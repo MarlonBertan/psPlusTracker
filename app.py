@@ -489,6 +489,12 @@ INDEX_HTML = r"""<!doctype html>
     .Ativo, .Entrada { background: #e9f8ee; color: #18723a; border-color: #bfe8cc; }
     .empty { color: var(--muted); text-align: center; padding: 28px; background: white; border: 1px dashed var(--line); border-radius: 8px; }
     .toast { min-height: 24px; margin-top: 10px; color: var(--muted); font-size: 14px; }
+    .progress-wrap { display: none; margin-top: 12px; }
+    .progress-track { height: 10px; overflow: hidden; background: #e8edf5; border-radius: 5px; }
+    .progress-bar { width: 0; height: 100%; background: var(--blue); border-radius: 5px; transition: width .25s ease; }
+    .progress-bar.processing { width: 45%; animation: processing 1.2s ease-in-out infinite; }
+    .progress-label { display: block; margin-top: 6px; color: var(--muted); font-size: 13px; font-weight: 700; }
+    @keyframes processing { 0% { transform: translateX(-100%); } 100% { transform: translateX(230%); } }
     .history { margin-top: 16px; }
     .history-item { border-top: 1px solid var(--line); padding: 10px 0; }
     @media (max-width: 900px) {
@@ -541,7 +547,11 @@ INDEX_HTML = r"""<!doctype html>
         <h2>Importar TXT</h2>
         <form id="importForm">
           <input id="txtFile" type="file" accept=".txt,text/plain">
-          <div class="actions"><button type="submit">Importar</button></div>
+          <div class="actions"><button id="importButton" type="submit">Importar</button></div>
+          <div class="progress-wrap" id="progressWrap" aria-live="polite">
+            <div class="progress-track"><div class="progress-bar" id="progressBar"></div></div>
+            <span class="progress-label" id="progressLabel">Preparando importacao...</span>
+          </div>
           <div class="toast" id="toast"></div>
         </form>
         <section class="history" id="historyPanel"></section>
@@ -640,10 +650,58 @@ INDEX_HTML = r"""<!doctype html>
       if (!file) { $('toast').textContent = 'Selecione um arquivo TXT.'; return; }
       const form = new FormData();
       form.append('file', file);
-      const result = await api('/api/import', { method: 'POST', body: form });
-      $('toast').textContent = `${result.imported} eventos importados ou atualizados.`;
-      $('txtFile').value = '';
-      await loadGames();
+      const button = $('importButton');
+      const bar = $('progressBar');
+      const wrap = $('progressWrap');
+      const label = $('progressLabel');
+      button.disabled = true;
+      button.textContent = 'Importando...';
+      $('toast').textContent = '';
+      wrap.style.display = 'block';
+      bar.className = 'progress-bar';
+      bar.style.width = '0%';
+      bar.style.background = '';
+
+      try {
+        const result = await new Promise((resolve, reject) => {
+          const xhr = new XMLHttpRequest();
+          xhr.open('POST', '/api/import');
+          xhr.upload.addEventListener('progress', (progress) => {
+            if (!progress.lengthComputable) return;
+            const percent = Math.round((progress.loaded / progress.total) * 100);
+            bar.style.width = `${Math.min(percent, 100)}%`;
+            label.textContent = `Enviando arquivo: ${percent}%`;
+          });
+          xhr.upload.addEventListener('load', () => {
+            bar.style.width = '';
+            bar.className = 'progress-bar processing';
+            label.textContent = 'Arquivo enviado. Processando jogos no banco...';
+          });
+          xhr.addEventListener('load', () => {
+            let data = {};
+            try { data = JSON.parse(xhr.responseText); } catch (_) {}
+            if (xhr.status >= 200 && xhr.status < 300) resolve(data);
+            else reject(new Error(data.error || 'Erro ao importar o arquivo.'));
+          });
+          xhr.addEventListener('error', () => reject(new Error('Falha de conexao durante a importacao.')));
+          xhr.send(form);
+        });
+        bar.className = 'progress-bar';
+        bar.style.width = '100%';
+        label.textContent = 'Importacao concluida.';
+        $('toast').textContent = `${result.imported} eventos importados ou atualizados.`;
+        $('txtFile').value = '';
+        await loadGames();
+      } catch (error) {
+        bar.className = 'progress-bar';
+        bar.style.width = '100%';
+        bar.style.background = 'var(--rose)';
+        label.textContent = 'A importacao nao foi concluida.';
+        $('toast').textContent = error.message;
+      } finally {
+        button.disabled = false;
+        button.textContent = 'Importar';
+      }
     });
     ['search', 'filterCategory', 'filterStatus'].forEach((id) => {
       $(id).addEventListener('input', loadGames);
