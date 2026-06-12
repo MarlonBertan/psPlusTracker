@@ -359,8 +359,76 @@ def upsert_event(payload):
 
 def upsert_events(payloads):
     with connect() as conn:
+        game_rows = execute(conn, "SELECT id, title, cover_url FROM games").fetchall()
+        games_by_title = {row["title"].upper(): row for row in game_rows}
+        event_rows = execute(
+            conn,
+            "SELECT id, game_id, event_type, category, period, event_year, event_month, event_date, notes FROM events",
+        ).fetchall()
+        events_by_key = {
+            (row["game_id"], row["event_type"], row["category"], row["period"]): row
+            for row in event_rows
+        }
+
         for payload in payloads:
-            upsert_event_with_connection(conn, payload)
+            title, event_type, category, period, event_date, notes, cover_url, event_year, event_month = prepare_event(payload)
+            game = games_by_title.get(title)
+
+            if game:
+                game_id = game["id"]
+                if game["title"] != title or (cover_url and game["cover_url"] != cover_url):
+                    conflict = execute(
+                        conn,
+                        "SELECT id FROM games WHERE title = ? AND id <> ?",
+                        (title, game_id),
+                    ).fetchone()
+                    if not conflict:
+                        execute(
+                            conn,
+                            "UPDATE games SET title = ?, cover_url = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+                            (title, cover_url or game["cover_url"], game_id),
+                        )
+            else:
+                execute(conn, "INSERT INTO games (title, cover_url) VALUES (?, ?)", (title, cover_url))
+                game_id = execute(conn, "SELECT id FROM games WHERE title = ?", (title,)).fetchone()["id"]
+                game = {"id": game_id, "title": title, "cover_url": cover_url}
+                games_by_title[title] = game
+
+            key = (game_id, event_type, category, period)
+            existing = events_by_key.get(key)
+            if existing:
+                changed = (
+                    existing["event_year"] != event_year
+                    or existing["event_month"] != event_month
+                    or (existing["event_date"] or "") != event_date
+                    or (existing["notes"] or "") != notes
+                )
+                if changed:
+                    execute(
+                        conn,
+                        "UPDATE events SET event_year = ?, event_month = ?, event_date = ?, notes = ? WHERE id = ?",
+                        (event_year, event_month, event_date, notes, existing["id"]),
+                    )
+            else:
+                execute(
+                    conn,
+                    """
+                    INSERT INTO events (game_id, event_type, category, period, event_year, event_month, event_date, notes)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (game_id, event_type, category, period, event_year, event_month, event_date, notes),
+                )
+                events_by_key[key] = {
+                    "id": None,
+                    "game_id": game_id,
+                    "event_type": event_type,
+                    "category": category,
+                    "period": period,
+                    "event_year": event_year,
+                    "event_month": event_month,
+                    "event_date": event_date,
+                    "notes": notes,
+                }
 
 
 def latest_games(filters):
@@ -962,12 +1030,16 @@ def api_update_event(event_id):
 @app.route("/api/import", methods=["POST"])
 @login_required
 def api_import():
-    file_item = request.files.get("file")
-    if not file_item:
-        return jsonify({"error": "Arquivo TXT nao enviado."}), 400
-    events = parse_import_text(decode_bytes(file_item.read()))
-    upsert_events(events)
-    return jsonify({"imported": len(events)})
+    try:
+        file_item = request.files.get("file")
+        if not file_item:
+            return jsonify({"error": "Arquivo TXT nao enviado."}), 400
+        events = parse_import_text(decode_bytes(file_item.read()))
+        upsert_events(events)
+        return jsonify({"imported": len(events)})
+    except Exception as exc:
+        app.logger.exception("Falha ao importar TXT")
+        return jsonify({"error": f"Falha no banco: {exc}"}), 500
 
 
 def import_file(path):
