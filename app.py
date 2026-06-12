@@ -915,7 +915,7 @@ INDEX_HTML = r"""<!doctype html>
       try {
         const result = await new Promise((resolve, reject) => {
           const xhr = new XMLHttpRequest();
-          xhr.open('POST', '/api/import');
+          xhr.open('POST', '/api/import/parse');
           xhr.upload.addEventListener('progress', (progress) => {
             if (!progress.lengthComputable) return;
             const percent = Math.round((progress.loaded / progress.total) * 100);
@@ -925,7 +925,7 @@ INDEX_HTML = r"""<!doctype html>
           xhr.upload.addEventListener('load', () => {
             bar.style.width = '';
             bar.className = 'progress-bar processing';
-            label.textContent = 'Arquivo enviado. Processando jogos no banco...';
+            label.textContent = 'Arquivo enviado. Analisando jogos...';
           });
           xhr.addEventListener('load', () => {
             let data = {};
@@ -939,10 +939,26 @@ INDEX_HTML = r"""<!doctype html>
           xhr.addEventListener('error', () => reject(new Error('Falha de conexao durante a importacao.')));
           xhr.send(form);
         });
+        const parsedEvents = result.events || [];
+        const batchSize = 100;
+        let processed = 0;
         bar.className = 'progress-bar';
+        bar.style.width = '0%';
+        for (let index = 0; index < parsedEvents.length; index += batchSize) {
+          const batch = parsedEvents.slice(index, index + batchSize);
+          await api('/api/import/batch', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ events: batch }),
+          });
+          processed += batch.length;
+          const percent = parsedEvents.length ? Math.round((processed / parsedEvents.length) * 100) : 100;
+          bar.style.width = `${percent}%`;
+          label.textContent = `Gravando no banco: ${processed} de ${parsedEvents.length} (${percent}%)`;
+        }
         bar.style.width = '100%';
         label.textContent = 'Importacao concluida.';
-        $('toast').textContent = `${result.imported} eventos importados ou atualizados.`;
+        $('toast').textContent = `${processed} eventos importados ou atualizados.`;
         $('txtFile').value = '';
         await loadGames();
       } catch (error) {
@@ -1069,6 +1085,27 @@ def api_import():
     except Exception as exc:
         app.logger.exception("Falha ao importar TXT")
         return jsonify({"error": f"Falha no banco: {exc}"}), 500
+
+
+@app.route("/api/import/parse", methods=["POST"])
+@login_required
+def api_import_parse():
+    file_item = request.files.get("file")
+    if not file_item:
+        return jsonify({"error": "Arquivo TXT nao enviado."}), 400
+    events = parse_import_text(decode_bytes(file_item.read()))
+    return jsonify({"events": events, "total": len(events)})
+
+
+@app.route("/api/import/batch", methods=["POST"])
+@login_required
+def api_import_batch():
+    payload = request.get_json(force=True) or {}
+    events = payload.get("events") or []
+    if not isinstance(events, list) or len(events) > 200:
+        return jsonify({"error": "Lote de importacao invalido."}), 400
+    upsert_events(events)
+    return jsonify({"processed": len(events)})
 
 
 def import_file(path):
