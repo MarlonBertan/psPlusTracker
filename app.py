@@ -23,6 +23,7 @@ MONTH_NUMBERS = {
 
 app = Flask(__name__)
 app.secret_key = os.environ.get("SECRET_KEY", "troque-esta-chave-no-render")
+DATABASE_READY = False
 
 
 def database_url():
@@ -140,17 +141,37 @@ def init_db():
             if "event_month" not in event_column_names:
                 execute(conn, "ALTER TABLE events ADD COLUMN event_month INTEGER NOT NULL DEFAULT 0")
 
-        missing_periods = execute(
-            conn,
-            "SELECT id, period FROM events WHERE event_year = 0 OR event_month = 0",
-        ).fetchall()
-        for event in missing_periods:
-            event_year, event_month = period_parts(event["period"])
+        if is_postgres():
             execute(
                 conn,
-                "UPDATE events SET event_year = ?, event_month = ? WHERE id = ?",
-                (event_year, event_month, event["id"]),
+                """
+                UPDATE events
+                SET
+                    event_year = COALESCE(NULLIF(SUBSTRING(period FROM '(\\d{4})'), '')::INTEGER, 0),
+                    event_month = CASE LOWER(SPLIT_PART(period, ' ', 1))
+                        WHEN 'janeiro' THEN 1 WHEN 'fevereiro' THEN 2
+                        WHEN 'marco' THEN 3 WHEN 'março' THEN 3
+                        WHEN 'abril' THEN 4 WHEN 'maio' THEN 5
+                        WHEN 'junho' THEN 6 WHEN 'julho' THEN 7
+                        WHEN 'agosto' THEN 8 WHEN 'setembro' THEN 9
+                        WHEN 'outubro' THEN 10 WHEN 'novembro' THEN 11
+                        WHEN 'dezembro' THEN 12 ELSE 0
+                    END
+                WHERE event_year = 0 OR event_month = 0
+                """,
             )
+        else:
+            missing_periods = execute(
+                conn,
+                "SELECT id, period FROM events WHERE event_year = 0 OR event_month = 0",
+            ).fetchall()
+            for event in missing_periods:
+                event_year, event_month = period_parts(event["period"])
+                execute(
+                    conn,
+                    "UPDATE events SET event_year = ?, event_month = ? WHERE id = ?",
+                    (event_year, event_month, event["id"]),
+                )
 
 
 def normalize_category(value):
@@ -376,18 +397,12 @@ def upsert_events(payloads):
 
             if game:
                 game_id = game["id"]
-                if game["title"] != title or (cover_url and game["cover_url"] != cover_url):
-                    conflict = execute(
+                if cover_url and game["cover_url"] != cover_url:
+                    execute(
                         conn,
-                        "SELECT id FROM games WHERE title = ? AND id <> ?",
-                        (title, game_id),
-                    ).fetchone()
-                    if not conflict:
-                        execute(
-                            conn,
-                            "UPDATE games SET title = ?, cover_url = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
-                            (title, cover_url or game["cover_url"], game_id),
-                        )
+                        "UPDATE games SET cover_url = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+                        (cover_url, game_id),
+                    )
             else:
                 execute(conn, "INSERT INTO games (title, cover_url) VALUES (?, ?)", (title, cover_url))
                 game_id = execute(conn, "SELECT id FROM games WHERE title = ?", (title,)).fetchone()["id"]
@@ -916,7 +931,10 @@ INDEX_HTML = r"""<!doctype html>
             let data = {};
             try { data = JSON.parse(xhr.responseText); } catch (_) {}
             if (xhr.status >= 200 && xhr.status < 300) resolve(data);
-            else reject(new Error(data.error || 'Erro ao importar o arquivo.'));
+            else {
+              const serverText = String(xhr.responseText || '').replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 240);
+              reject(new Error(data.error || `Erro HTTP ${xhr.status}: ${serverText || 'sem resposta do servidor'}`));
+            }
           });
           xhr.addEventListener('error', () => reject(new Error('Falha de conexao durante a importacao.')));
           xhr.send(form);
@@ -952,7 +970,10 @@ INDEX_HTML = r"""<!doctype html>
 
 @app.before_request
 def ensure_database():
-    init_db()
+    global DATABASE_READY
+    if not DATABASE_READY:
+        init_db()
+        DATABASE_READY = True
 
 
 @app.route("/login", methods=["GET", "POST"])
