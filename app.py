@@ -1,0 +1,738 @@
+import hmac
+import os
+import re
+import sqlite3
+import sys
+from datetime import date, datetime
+from functools import wraps
+
+from flask import Flask, jsonify, redirect, render_template_string, request, session, url_for
+
+
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+DATA_DIR = os.path.join(BASE_DIR, "data")
+SQLITE_PATH = os.path.join(DATA_DIR, "ps_plus.db")
+CATEGORIES = ("Essential", "Extra", "Deluxe")
+
+
+app = Flask(__name__)
+app.secret_key = os.environ.get("SECRET_KEY", "troque-esta-chave-no-render")
+
+
+def database_url():
+    return os.environ.get("DATABASE_URL") or f"sqlite:///{SQLITE_PATH}"
+
+
+def is_postgres():
+    return database_url().startswith(("postgres://", "postgresql://"))
+
+
+def connect():
+    if is_postgres():
+        import psycopg
+        from psycopg.rows import dict_row
+
+        url = database_url().replace("postgres://", "postgresql://", 1)
+        return psycopg.connect(url, row_factory=dict_row)
+
+    os.makedirs(DATA_DIR, exist_ok=True)
+    conn = sqlite3.connect(SQLITE_PATH)
+    conn.row_factory = sqlite3.Row
+    return conn
+
+
+def sql(query):
+    return query.replace("?", "%s") if is_postgres() else query
+
+
+def row_to_dict(row):
+    return dict(row)
+
+
+def execute(conn, query, params=()):
+    return conn.execute(sql(query), params)
+
+
+def init_db():
+    with connect() as conn:
+        if is_postgres():
+            execute(
+                conn,
+                """
+                CREATE TABLE IF NOT EXISTS games (
+                    id SERIAL PRIMARY KEY,
+                    title TEXT NOT NULL UNIQUE,
+                    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+                )
+                """,
+            )
+            execute(
+                conn,
+                """
+                CREATE TABLE IF NOT EXISTS events (
+                    id SERIAL PRIMARY KEY,
+                    game_id INTEGER NOT NULL REFERENCES games(id) ON DELETE CASCADE,
+                    event_type TEXT NOT NULL CHECK(event_type IN ('Entrada', 'Saida')),
+                    category TEXT NOT NULL DEFAULT '',
+                    period TEXT NOT NULL,
+                    event_date TEXT,
+                    notes TEXT,
+                    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    UNIQUE(game_id, event_type, category, period)
+                )
+                """,
+            )
+        else:
+            execute(
+                conn,
+                """
+                CREATE TABLE IF NOT EXISTS games (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    title TEXT NOT NULL UNIQUE,
+                    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+                )
+                """,
+            )
+            execute(
+                conn,
+                """
+                CREATE TABLE IF NOT EXISTS events (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    game_id INTEGER NOT NULL,
+                    event_type TEXT NOT NULL CHECK(event_type IN ('Entrada', 'Saida')),
+                    category TEXT NOT NULL DEFAULT '',
+                    period TEXT NOT NULL,
+                    event_date TEXT,
+                    notes TEXT,
+                    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY(game_id) REFERENCES games(id) ON DELETE CASCADE,
+                    UNIQUE(game_id, event_type, category, period)
+                )
+                """,
+            )
+
+
+def normalize_category(value):
+    value = (value or "").strip().lower()
+    if "essential" in value or "essencial" in value:
+        return "Essential"
+    if "extra" in value:
+        return "Extra"
+    if "deluxe" in value or "premium" in value:
+        return "Deluxe"
+    return ""
+
+
+def normalize_event_type(value):
+    value = (value or "").strip().lower()
+    if value in ("saida", "saída", "saiu", "removido", "removed", "leaving") or "sai" in value or "remove" in value:
+        return "Saida"
+    return "Entrada"
+
+
+def current_period():
+    months = [
+        "Janeiro", "Fevereiro", "Marco", "Abril", "Maio", "Junho",
+        "Julho", "Agosto", "Setembro", "Outubro", "Novembro", "Dezembro",
+    ]
+    today = date.today()
+    return f"{months[today.month - 1]} {today.year}"
+
+
+def parse_date(value):
+    value = (value or "").strip()
+    if not value:
+        return ""
+    for fmt in ("%Y-%m-%d", "%d/%m/%Y", "%d-%m-%Y", "%m/%d/%Y"):
+        try:
+            return datetime.strptime(value, fmt).date().isoformat()
+        except ValueError:
+            pass
+    return value
+
+
+def clean_title(title):
+    title = re.sub(r"[\x00-\x1f]", "", title or "")
+    title = re.sub(r"^[\-*•\d\.\)\s]+", "", title).strip()
+    title = re.sub(r"\s*\[[^\]]+\]\s*$", "", title)
+    title = re.sub(
+        r"\s*\((?:PS4|PS5|PS1|PS2|PS3|PSP|PS VR2?|PSVR2?|PS4/PS5|PS5/PS4|PS4, PS5|PS5, PS4|PS4 e PS5|PS5 e PS4|Apenas no plano Deluxe)\)\s*$",
+        "",
+        title,
+        flags=re.I,
+    )
+    title = re.sub(r"\s+", " ", title)
+    return title.strip(" -:;")
+
+
+def split_title_and_notes(line):
+    notes = []
+    title = line.strip()
+
+    for note in re.findall(r"\[([^\]]+)\]", title):
+        notes.append(note)
+    title = re.sub(r"\[[^\]]+\]", "", title)
+
+    if "|" in title:
+        left, right = title.split("|", 1)
+        title = left.strip()
+        if right.strip():
+            notes.append(right.strip())
+    else:
+        platform_match = re.search(r"\(([^)]*(?:PS4|PS5|PSVR|PS VR|PSP|PS1|PS2|PS3)[^)]*)\)\s*$", title, flags=re.I)
+        if platform_match:
+            notes.append(platform_match.group(1).strip())
+            title = title[: platform_match.start()].strip()
+
+    return clean_title(title), " | ".join(dict.fromkeys(note for note in notes if note))
+
+
+def parse_import_text(text):
+    events = []
+    current_category = ""
+    current_event_type = "Entrada"
+    current_period_value = current_period()
+    months = "JANEIRO|FEVEREIRO|MARCO|MARÇO|ABRIL|MAIO|JUNHO|JULHO|AGOSTO|SETEMBRO|OUTUBRO|NOVEMBRO|DEZEMBRO"
+
+    for raw_line in text.splitlines():
+        line = raw_line.strip()
+        if not line or set(line) <= {"-", "*"}:
+            continue
+
+        month_match = re.match(rf"^({months})\s+(\d{{4}})$", line, flags=re.I)
+        if month_match:
+            current_period_value = f"{month_match.group(1).title()} {month_match.group(2)}"
+            current_category = ""
+            current_event_type = "Entrada"
+            continue
+
+        category = normalize_category(line)
+        line_key = re.sub(r"[^a-zA-ZÀ-ÿ]", "", line).lower()
+        if category and len(line.split()) <= 3:
+            current_category = category
+            current_event_type = "Entrada"
+            continue
+        if "sairamdocatalogo" in line_key or "sairamdocatálogo" in line_key or "sairam" == line_key:
+            current_category = ""
+            current_event_type = "Saida"
+            continue
+
+        title, notes = split_title_and_notes(line)
+        if not title or title.upper() == "PS PLUS DELUXE":
+            continue
+
+        removal_date = re.search(r"\[([^\]]+)\]", line)
+        events.append(
+            {
+                "title": title,
+                "event_type": current_event_type,
+                "category": current_category if current_event_type == "Entrada" else "",
+                "period": current_period_value,
+                "event_date": removal_date.group(1) if removal_date and current_event_type == "Saida" else "",
+                "notes": notes,
+            }
+        )
+    return events
+
+
+def decode_bytes(raw):
+    for encoding in ("utf-8-sig", "utf-8", "cp1252", "latin-1"):
+        try:
+            return raw.decode(encoding)
+        except UnicodeDecodeError:
+            continue
+    return raw.decode("latin-1", errors="replace")
+
+
+def upsert_event(payload):
+    title = clean_title(payload.get("title"))
+    event_type = normalize_event_type(payload.get("event_type"))
+    category = normalize_category(payload.get("category")) if event_type == "Entrada" else ""
+    period = (payload.get("period") or current_period()).strip()
+    event_date = parse_date(payload.get("event_date"))
+    notes = (payload.get("notes") or "").strip()
+
+    if not title:
+        raise ValueError("Informe o nome do jogo.")
+    if event_type == "Entrada" and not category:
+        raise ValueError("Informe Essential, Extra ou Deluxe para uma entrada.")
+    if not period:
+        raise ValueError("Informe o mes/ano do evento.")
+
+    with connect() as conn:
+        row = execute(conn, "SELECT id FROM games WHERE title = ?", (title,)).fetchone()
+        if row:
+            game_id = row["id"]
+            execute(conn, "UPDATE games SET updated_at = CURRENT_TIMESTAMP WHERE id = ?", (game_id,))
+        else:
+            execute(conn, "INSERT INTO games (title) VALUES (?)", (title,))
+            game_id = execute(conn, "SELECT id FROM games WHERE title = ?", (title,)).fetchone()["id"]
+
+        existing = execute(
+            conn,
+            """
+            SELECT id FROM events
+            WHERE game_id = ? AND event_type = ? AND category = ? AND period = ?
+            """,
+            (game_id, event_type, category, period),
+        ).fetchone()
+        if existing:
+            execute(
+                conn,
+                "UPDATE events SET event_date = ?, notes = ? WHERE id = ?",
+                (event_date, notes, existing["id"]),
+            )
+        else:
+            execute(
+                conn,
+                """
+                INSERT INTO events (game_id, event_type, category, period, event_date, notes)
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (game_id, event_type, category, period, event_date, notes),
+            )
+    return game_id
+
+
+def latest_games(filters):
+    clauses = []
+    params = []
+    if filters.get("q"):
+        clauses.append("g.title LIKE ?")
+        params.append(f"%{filters['q']}%")
+    if filters.get("category"):
+        clauses.append("latest.category = ?")
+        params.append(filters["category"])
+    if filters.get("status") == "Ativo":
+        clauses.append("latest.event_type = 'Entrada'")
+    elif filters.get("status") == "Saiu":
+        clauses.append("latest.event_type = 'Saida'")
+
+    where = "WHERE " + " AND ".join(clauses) if clauses else ""
+    with connect() as conn:
+        rows = execute(
+            conn,
+            f"""
+            WITH latest AS (
+                SELECT e.*
+                FROM events e
+                JOIN (SELECT game_id, MAX(id) AS id FROM events GROUP BY game_id) x ON x.id = e.id
+            )
+            SELECT
+                g.id,
+                g.title,
+                latest.event_type,
+                CASE WHEN latest.event_type = 'Entrada' THEN 'Ativo' ELSE 'Saiu' END AS status,
+                latest.category,
+                latest.period,
+                latest.event_date,
+                latest.notes,
+                (SELECT COUNT(*) FROM events h WHERE h.game_id = g.id) AS history_count
+            FROM games g
+            JOIN latest ON latest.game_id = g.id
+            {where}
+            ORDER BY CASE latest.event_type WHEN 'Entrada' THEN 1 ELSE 2 END, g.title
+            """,
+            params,
+        ).fetchall()
+    return [row_to_dict(row) for row in rows]
+
+
+def history_for_game(game_id):
+    with connect() as conn:
+        rows = execute(
+            conn,
+            """
+            SELECT e.*, g.title
+            FROM events e
+            JOIN games g ON g.id = e.game_id
+            WHERE e.game_id = ?
+            ORDER BY e.id DESC
+            """,
+            (game_id,),
+        ).fetchall()
+    return [row_to_dict(row) for row in rows]
+
+
+def counts():
+    with connect() as conn:
+        row = execute(
+            conn,
+            """
+            WITH latest AS (
+                SELECT e.*
+                FROM events e
+                JOIN (SELECT game_id, MAX(id) AS id FROM events GROUP BY game_id) x ON x.id = e.id
+            )
+            SELECT
+                COUNT(*) AS total,
+                COALESCE(SUM(CASE WHEN event_type = 'Entrada' THEN 1 ELSE 0 END), 0) AS active,
+                COALESCE(SUM(CASE WHEN event_type = 'Saida' THEN 1 ELSE 0 END), 0) AS removed,
+                (SELECT COUNT(*) FROM events) AS events
+            FROM latest
+            """,
+        ).fetchone()
+    return row_to_dict(row)
+
+
+def login_required(view):
+    @wraps(view)
+    def wrapped(*args, **kwargs):
+        if not session.get("logged_in"):
+            return redirect(url_for("login", next=request.path))
+        return view(*args, **kwargs)
+
+    return wrapped
+
+
+def admin_user():
+    return os.environ.get("ADMIN_USER", "admin")
+
+
+def admin_password():
+    return os.environ.get("ADMIN_PASSWORD", "admin")
+
+
+LOGIN_HTML = """
+<!doctype html>
+<html lang="pt-BR">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Login - PS Plus Tracker</title>
+  <style>
+    body { margin: 0; min-height: 100vh; display: grid; place-items: center; font-family: system-ui, sans-serif; background: #f5f7fb; color: #172033; }
+    form { width: min(380px, calc(100% - 24px)); background: white; border: 1px solid #dfe5ef; border-radius: 8px; padding: 22px; box-shadow: 0 12px 32px rgba(23,32,51,.08); }
+    h1 { margin: 0 0 16px; font-size: 24px; }
+    label { display: block; margin: 12px 0 6px; color: #627089; font-weight: 700; font-size: 13px; }
+    input, button { width: 100%; min-height: 42px; border-radius: 8px; font: inherit; }
+    input { border: 1px solid #dfe5ef; padding: 9px 11px; }
+    button { border: 1px solid #1355d8; background: #1355d8; color: white; margin-top: 16px; font-weight: 700; cursor: pointer; }
+    p { color: #b72e56; min-height: 20px; }
+  </style>
+</head>
+<body>
+  <form method="post">
+    <h1>PS Plus Tracker</h1>
+    <p>{{ error or "" }}</p>
+    <label for="username">Usuario</label>
+    <input id="username" name="username" autocomplete="username" required>
+    <label for="password">Senha</label>
+    <input id="password" name="password" type="password" autocomplete="current-password" required>
+    <button type="submit">Entrar</button>
+  </form>
+</body>
+</html>
+"""
+
+
+INDEX_HTML = r"""<!doctype html>
+<html lang="pt-BR">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>PS Plus Tracker</title>
+  <style>
+    :root { --bg:#f5f7fb; --panel:#fff; --ink:#172033; --muted:#627089; --line:#dfe5ef; --blue:#1355d8; --teal:#0a7f7b; --rose:#b72e56; --amber:#9b6413; --shadow:0 12px 32px rgba(23,32,51,.08); }
+    * { box-sizing: border-box; }
+    body { margin: 0; font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; background: var(--bg); color: var(--ink); }
+    header { background: #101828; color: white; padding: 20px clamp(16px, 4vw, 42px); }
+    .top { display: flex; justify-content: space-between; gap: 12px; align-items: center; }
+    h1 { margin: 0; font-size: clamp(24px, 4vw, 36px); letter-spacing: 0; }
+    header p { margin: 8px 0 0; color: #cbd5e1; max-width: 840px; }
+    header a { color: white; text-decoration: none; border: 1px solid #475467; border-radius: 8px; padding: 8px 12px; }
+    main { width: min(1200px, 100%); margin: 0 auto; padding: 20px clamp(12px, 3vw, 28px) 44px; }
+    .toolbar { display: grid; grid-template-columns: 1fr 160px 140px; gap: 10px; margin-bottom: 16px; }
+    input, select, textarea, button { font: inherit; border: 1px solid var(--line); border-radius: 8px; min-height: 42px; }
+    input, select, textarea { width: 100%; padding: 9px 11px; background: white; color: var(--ink); }
+    textarea { min-height: 74px; resize: vertical; }
+    button { background: var(--blue); color: white; border-color: var(--blue); padding: 9px 14px; cursor: pointer; font-weight: 700; }
+    button.secondary { background: white; color: var(--blue); border-color: #b8c9f4; }
+    .grid { display: grid; grid-template-columns: minmax(310px, 390px) 1fr; gap: 18px; align-items: start; }
+    .panel { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; box-shadow: var(--shadow); padding: 16px; }
+    h2 { margin: 0 0 14px; font-size: 18px; letter-spacing: 0; }
+    label { display: block; color: var(--muted); font-size: 13px; font-weight: 700; margin: 12px 0 6px; }
+    .row { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+    .actions { display: flex; gap: 10px; flex-wrap: wrap; margin-top: 14px; }
+    .stats { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; margin-bottom: 14px; }
+    .stat { background: white; border: 1px solid var(--line); border-radius: 8px; padding: 12px; }
+    .stat b { display: block; font-size: 24px; line-height: 1; }
+    .stat span { color: var(--muted); font-size: 12px; font-weight: 700; }
+    table { width: 100%; border-collapse: collapse; background: white; border: 1px solid var(--line); border-radius: 8px; overflow: hidden; }
+    th, td { padding: 11px 10px; border-bottom: 1px solid var(--line); text-align: left; vertical-align: top; font-size: 14px; }
+    th { color: var(--muted); font-size: 12px; text-transform: uppercase; }
+    tr:last-child td { border-bottom: 0; }
+    small { color: var(--muted); }
+    .pill { display: inline-flex; min-width: 78px; justify-content: center; border-radius: 999px; padding: 4px 8px; font-size: 12px; font-weight: 800; border: 1px solid transparent; }
+    .Essential { background: #e8f1ff; color: var(--blue); border-color: #c8dafc; }
+    .Extra { background: #e6f6f4; color: var(--teal); border-color: #bde4df; }
+    .Deluxe { background: #fff4df; color: var(--amber); border-color: #f1d8aa; }
+    .Saiu, .Saida { background: #ffe8ef; color: var(--rose); border-color: #f4c2d0; }
+    .Ativo, .Entrada { background: #e9f8ee; color: #18723a; border-color: #bfe8cc; }
+    .empty { color: var(--muted); text-align: center; padding: 28px; background: white; border: 1px dashed var(--line); border-radius: 8px; }
+    .toast { min-height: 24px; margin-top: 10px; color: var(--muted); font-size: 14px; }
+    .history { margin-top: 16px; }
+    .history-item { border-top: 1px solid var(--line); padding: 10px 0; }
+    @media (max-width: 900px) {
+      .top { align-items: flex-start; }
+      .grid, .toolbar, .stats, .row { grid-template-columns: 1fr; }
+      table, thead, tbody, tr, th, td { display: block; }
+      thead { display: none; }
+      tr { border-bottom: 1px solid var(--line); padding: 8px 0; }
+      td { border: 0; padding: 6px 10px; }
+      td[data-label]::before { content: attr(data-label) ": "; color: var(--muted); font-weight: 800; }
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <div class="top">
+      <div>
+        <h1>PS Plus Tracker</h1>
+        <p>Cadastre entradas, marque saidas por mes e mantenha o historico dos jogos que voltam ao catalogo.</p>
+      </div>
+      <a href="/logout">Sair</a>
+    </div>
+  </header>
+  <main>
+    <section class="toolbar">
+      <input id="search" placeholder="Buscar jogo">
+      <select id="filterCategory"><option value="">Todas as categorias</option><option>Essential</option><option>Extra</option><option>Deluxe</option></select>
+      <select id="filterStatus"><option value="">Todos</option><option>Ativo</option><option>Saiu</option></select>
+    </section>
+    <section class="stats" id="stats"></section>
+    <section class="grid">
+      <aside class="panel">
+        <h2>Registrar evento</h2>
+        <form id="eventForm">
+          <label for="title">Jogo</label>
+          <input id="title" required placeholder="Ex.: God of War">
+          <div class="row">
+            <div><label for="eventType">Evento</label><select id="eventType"><option>Entrada</option><option>Saida</option></select></div>
+            <div><label for="category">Categoria</label><select id="category"><option>Essential</option><option>Extra</option><option>Deluxe</option></select></div>
+          </div>
+          <div class="row">
+            <div><label for="period">Mes/Ano</label><input id="period" placeholder="Junho 2026"></div>
+            <div><label for="eventDate">Data exata</label><input id="eventDate" type="date"></div>
+          </div>
+          <label for="notes">Notas</label>
+          <textarea id="notes" placeholder="Plataformas, fonte ou observacoes"></textarea>
+          <div class="actions"><button type="submit">Salvar evento</button><button type="button" class="secondary" id="clearForm">Limpar</button></div>
+        </form>
+        <hr style="border:0;border-top:1px solid var(--line);margin:20px 0">
+        <h2>Importar TXT</h2>
+        <form id="importForm">
+          <input id="txtFile" type="file" accept=".txt,text/plain">
+          <div class="actions"><button type="submit">Importar</button></div>
+          <div class="toast" id="toast"></div>
+        </form>
+        <section class="history" id="historyPanel"></section>
+      </aside>
+      <section><div id="tableWrap"></div></section>
+    </section>
+  </main>
+  <script>
+    const $ = (id) => document.getElementById(id);
+    let games = [];
+    const defaultPeriod = new Intl.DateTimeFormat('pt-BR', { month: 'long', year: 'numeric' }).format(new Date()).replace(/^./, c => c.toUpperCase());
+    $('period').value = defaultPeriod;
+    async function api(path, options = {}) {
+      const response = await fetch(path, options);
+      if (response.redirected) location.href = response.url;
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.error || 'Erro inesperado');
+      return data;
+    }
+    function escapeHtml(value) {
+      return String(value || '').replace(/[&<>"']/g, (char) => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#039;'}[char]));
+    }
+    function queryString() {
+      const query = new URLSearchParams();
+      if ($('search').value) query.set('q', $('search').value);
+      if ($('filterCategory').value) query.set('category', $('filterCategory').value);
+      if ($('filterStatus').value) query.set('status', $('filterStatus').value);
+      return query.toString();
+    }
+    async function loadGames() {
+      games = await api('/api/games?' + queryString());
+      renderStats(await api('/api/stats'));
+      renderTable();
+    }
+    function renderStats(stats) {
+      $('stats').innerHTML = [['Jogos', stats.total || 0], ['Ativos', stats.active || 0], ['Sairam', stats.removed || 0], ['Eventos', stats.events || 0]]
+        .map(([label, value]) => `<div class="stat"><b>${value}</b><span>${label}</span></div>`).join('');
+    }
+    function renderTable() {
+      if (!games.length) { $('tableWrap').innerHTML = '<div class="empty">Nenhum jogo encontrado.</div>'; return; }
+      $('tableWrap').innerHTML = `<table><thead><tr><th>Jogo</th><th>Status</th><th>Categoria</th><th>Mes</th><th>Historico</th><th>Acoes</th></tr></thead><tbody>` +
+        games.map((game) => `
+          <tr>
+            <td data-label="Jogo"><strong>${escapeHtml(game.title)}</strong><br><small>${escapeHtml(game.notes || '')}</small></td>
+            <td data-label="Status"><span class="pill ${game.status}">${game.status}</span></td>
+            <td data-label="Categoria">${game.category ? `<span class="pill ${game.category}">${game.category}</span>` : '-'}</td>
+            <td data-label="Mes">${escapeHtml(game.period || '-')}</td>
+            <td data-label="Historico">${game.history_count} evento(s)</td>
+            <td data-label="Acoes"><button class="secondary" type="button" onclick="markEntry(${game.id})">Entrada</button> <button class="secondary" type="button" onclick="markExit(${game.id})">Saida</button> <button class="secondary" type="button" onclick="showHistory(${game.id})">Historico</button></td>
+          </tr>`).join('') + '</tbody></table>';
+    }
+    function clearForm() {
+      $('eventForm').reset();
+      $('eventType').value = 'Entrada';
+      $('category').disabled = false;
+      $('period').value = defaultPeriod;
+    }
+    function fillFromGame(id, eventType) {
+      const game = games.find(item => item.id === id);
+      if (!game) return;
+      $('title').value = game.title;
+      $('eventType').value = eventType;
+      $('category').value = game.category || 'Extra';
+      $('category').disabled = eventType === 'Saida';
+      $('period').value = defaultPeriod;
+      $('eventDate').value = '';
+      $('notes').value = '';
+      window.scrollTo({ top: 0, behavior: 'smooth' });
+    }
+    window.markEntry = (id) => fillFromGame(id, 'Entrada');
+    window.markExit = (id) => fillFromGame(id, 'Saida');
+    window.showHistory = async function(id) {
+      const items = await api('/api/games/' + id + '/events');
+      if (!items.length) return;
+      $('historyPanel').innerHTML = '<h2>Historico</h2>' + items.map((item) => `
+        <div class="history-item">
+          <strong>${escapeHtml(item.title)}</strong><br>
+          <span class="pill ${item.event_type}">${item.event_type}</span>
+          ${item.category ? `<span class="pill ${item.category}">${item.category}</span>` : ''}
+          <small>${escapeHtml(item.period)} ${item.event_date ? '- ' + escapeHtml(item.event_date) : ''}</small>
+          ${item.notes ? `<br><small>${escapeHtml(item.notes)}</small>` : ''}
+        </div>`).join('');
+    }
+    $('eventType').addEventListener('change', () => { $('category').disabled = $('eventType').value === 'Saida'; });
+    $('eventForm').addEventListener('submit', async (event) => {
+      event.preventDefault();
+      await api('/api/events', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({
+        title: $('title').value, event_type: $('eventType').value, category: $('category').value, period: $('period').value, event_date: $('eventDate').value, notes: $('notes').value
+      })});
+      clearForm();
+      await loadGames();
+    });
+    $('importForm').addEventListener('submit', async (event) => {
+      event.preventDefault();
+      const file = $('txtFile').files[0];
+      if (!file) { $('toast').textContent = 'Selecione um arquivo TXT.'; return; }
+      const form = new FormData();
+      form.append('file', file);
+      const result = await api('/api/import', { method: 'POST', body: form });
+      $('toast').textContent = `${result.imported} eventos importados ou atualizados.`;
+      $('txtFile').value = '';
+      await loadGames();
+    });
+    ['search', 'filterCategory', 'filterStatus'].forEach((id) => {
+      $(id).addEventListener('input', loadGames);
+      $(id).addEventListener('change', loadGames);
+    });
+    $('clearForm').addEventListener('click', clearForm);
+    loadGames();
+  </script>
+</body>
+</html>
+"""
+
+
+@app.before_request
+def ensure_database():
+    init_db()
+
+
+@app.route("/login", methods=["GET", "POST"])
+def login():
+    error = ""
+    if request.method == "POST":
+        ok_user = hmac.compare_digest(request.form.get("username", ""), admin_user())
+        ok_password = hmac.compare_digest(request.form.get("password", ""), admin_password())
+        if ok_user and ok_password:
+            session["logged_in"] = True
+            return redirect(request.args.get("next") or url_for("index"))
+        error = "Usuario ou senha invalidos."
+    return render_template_string(LOGIN_HTML, error=error)
+
+
+@app.route("/logout")
+def logout():
+    session.clear()
+    return redirect(url_for("login"))
+
+
+@app.route("/")
+@login_required
+def index():
+    return render_template_string(INDEX_HTML)
+
+
+@app.route("/api/games")
+@login_required
+def api_games():
+    filters = {
+        "q": request.args.get("q", "").strip(),
+        "category": normalize_category(request.args.get("category", "")),
+        "status": request.args.get("status", "").strip(),
+    }
+    return jsonify(latest_games(filters))
+
+
+@app.route("/api/stats")
+@login_required
+def api_stats():
+    return jsonify(counts())
+
+
+@app.route("/api/games/<int:game_id>/events")
+@login_required
+def api_game_events(game_id):
+    return jsonify(history_for_game(game_id))
+
+
+@app.route("/api/events", methods=["POST"])
+@login_required
+def api_events():
+    try:
+        game_id = upsert_event(request.get_json(force=True))
+        return jsonify({"ok": True, "game_id": game_id}), 201
+    except Exception as exc:
+        return jsonify({"error": str(exc)}), 400
+
+
+@app.route("/api/import", methods=["POST"])
+@login_required
+def api_import():
+    file_item = request.files.get("file")
+    if not file_item:
+        return jsonify({"error": "Arquivo TXT nao enviado."}), 400
+    events = parse_import_text(decode_bytes(file_item.read()))
+    for event in events:
+        upsert_event(event)
+    return jsonify({"imported": len(events)})
+
+
+def import_file(path):
+    init_db()
+    with open(path, "rb") as file:
+        events = parse_import_text(decode_bytes(file.read()))
+    for event in events:
+        upsert_event(event)
+    print(f"{len(events)} eventos importados ou atualizados.")
+    print(f"Banco: {database_url()}")
+
+
+def main():
+    if len(sys.argv) >= 3 and sys.argv[1] == "--import":
+        import_file(sys.argv[2])
+        return
+    init_db()
+    app.run(host=os.environ.get("HOST", "127.0.0.1"), port=int(os.environ.get("PORT", "8000")))
+
+
+if __name__ == "__main__":
+    main()
