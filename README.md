@@ -51,31 +51,23 @@ python app.py --import 'C:\marlon\ps plus.txt'
 
 Tambem da para importar pela propria tela do app depois do login.
 
-## Publicar no Render
+## Publicar gratuitamente com Render + Neon
 
-1. Crie uma conta no Render.
-2. Crie um repositorio no GitHub com estes arquivos.
-3. No Render, escolha **New +** e depois **Blueprint** se quiser usar o `render.yaml`.
-4. Conecte o repositorio do GitHub.
-5. O blueprint cria:
-   - um Web Service Python;
-   - um PostgreSQL chamado `ps-plus-tracker-db`;
-   - a variavel `DATABASE_URL` ligada ao banco.
-6. Configure as variaveis que ficaram como `sync: false`:
+1. Crie uma conta gratuita em https://neon.com.
+2. No Neon, crie um projeto PostgreSQL.
+3. Copie a connection string do banco. Use a conexao pooled quando ela estiver disponivel.
+4. Crie uma conta no Render.
+5. No Render, escolha **New +** e depois **Blueprint**.
+6. Conecte o repositorio do GitHub.
+7. Configure as variaveis que ficaram como `sync: false`:
    - `ADMIN_USER`
    - `ADMIN_PASSWORD`
-7. Aguarde o deploy terminar e abra a URL publica do Render.
-8. Faca login e importe o arquivo TXT pela tela do app.
+   - `DATABASE_URL`: cole a connection string do Neon.
+8. O `SECRET_KEY` sera gerado automaticamente pelo Render.
+9. Aguarde o deploy terminar e abra a URL publica do Render.
+10. Faca login e importe o arquivo TXT pela tela do app.
 
-## Alternativa mais barata
-
-Se quiser evitar o PostgreSQL pago do Render, crie o banco gratuito no Supabase e use no Render apenas o Web Service.
-
-Nesse caso, no Render:
-
-- nao use a secao `databases` do `render.yaml`;
-- crie a variavel `DATABASE_URL` manualmente com a connection string do Supabase;
-- mantenha `SECRET_KEY`, `ADMIN_USER` e `ADMIN_PASSWORD`.
+O plano Free do Neon possui limites de armazenamento e uso, mas nao expira depois de 30 dias. Para este aplicativo pessoal, os limites gratuitos tendem a ser suficientes.
 
 ## Variaveis de ambiente
 
