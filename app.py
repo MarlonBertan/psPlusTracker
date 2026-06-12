@@ -976,6 +976,14 @@ def ensure_database():
         DATABASE_READY = True
 
 
+@app.errorhandler(Exception)
+def handle_unexpected_error(exc):
+    app.logger.exception("Erro inesperado na aplicacao")
+    if request.path.startswith("/api/"):
+        return jsonify({"error": f"Erro interno: {type(exc).__name__}: {exc}"}), 500
+    return f"Erro interno: {type(exc).__name__}: {exc}", 500
+
+
 @app.route("/login", methods=["GET", "POST"])
 def login():
     error = ""
