@@ -246,7 +246,7 @@ def decode_bytes(raw):
     return raw.decode("latin-1", errors="replace")
 
 
-def upsert_event(payload):
+def prepare_event(payload):
     title = clean_title(payload.get("title"))
     event_type = normalize_event_type(payload.get("event_type"))
     category = normalize_category(payload.get("category")) if event_type == "Entrada" else ""
@@ -261,39 +261,55 @@ def upsert_event(payload):
     if not period:
         raise ValueError("Informe o mes/ano do evento.")
 
-    with connect() as conn:
-        row = execute(conn, "SELECT id FROM games WHERE title = ?", (title,)).fetchone()
-        if row:
-            game_id = row["id"]
-            execute(conn, "UPDATE games SET updated_at = CURRENT_TIMESTAMP WHERE id = ?", (game_id,))
-        else:
-            execute(conn, "INSERT INTO games (title) VALUES (?)", (title,))
-            game_id = execute(conn, "SELECT id FROM games WHERE title = ?", (title,)).fetchone()["id"]
+    return title, event_type, category, period, event_date, notes
 
-        existing = execute(
+
+def upsert_event_with_connection(conn, payload):
+    title, event_type, category, period, event_date, notes = prepare_event(payload)
+
+    row = execute(conn, "SELECT id FROM games WHERE title = ?", (title,)).fetchone()
+    if row:
+        game_id = row["id"]
+        execute(conn, "UPDATE games SET updated_at = CURRENT_TIMESTAMP WHERE id = ?", (game_id,))
+    else:
+        execute(conn, "INSERT INTO games (title) VALUES (?)", (title,))
+        game_id = execute(conn, "SELECT id FROM games WHERE title = ?", (title,)).fetchone()["id"]
+
+    existing = execute(
+        conn,
+        """
+        SELECT id FROM events
+        WHERE game_id = ? AND event_type = ? AND category = ? AND period = ?
+        """,
+        (game_id, event_type, category, period),
+    ).fetchone()
+    if existing:
+        execute(
+            conn,
+            "UPDATE events SET event_date = ?, notes = ? WHERE id = ?",
+            (event_date, notes, existing["id"]),
+        )
+    else:
+        execute(
             conn,
             """
-            SELECT id FROM events
-            WHERE game_id = ? AND event_type = ? AND category = ? AND period = ?
+            INSERT INTO events (game_id, event_type, category, period, event_date, notes)
+            VALUES (?, ?, ?, ?, ?, ?)
             """,
-            (game_id, event_type, category, period),
-        ).fetchone()
-        if existing:
-            execute(
-                conn,
-                "UPDATE events SET event_date = ?, notes = ? WHERE id = ?",
-                (event_date, notes, existing["id"]),
-            )
-        else:
-            execute(
-                conn,
-                """
-                INSERT INTO events (game_id, event_type, category, period, event_date, notes)
-                VALUES (?, ?, ?, ?, ?, ?)
-                """,
-                (game_id, event_type, category, period, event_date, notes),
-            )
+            (game_id, event_type, category, period, event_date, notes),
+        )
     return game_id
+
+
+def upsert_event(payload):
+    with connect() as conn:
+        return upsert_event_with_connection(conn, payload)
+
+
+def upsert_events(payloads):
+    with connect() as conn:
+        for payload in payloads:
+            upsert_event_with_connection(conn, payload)
 
 
 def latest_games(filters):
@@ -711,8 +727,7 @@ def api_import():
     if not file_item:
         return jsonify({"error": "Arquivo TXT nao enviado."}), 400
     events = parse_import_text(decode_bytes(file_item.read()))
-    for event in events:
-        upsert_event(event)
+    upsert_events(events)
     return jsonify({"imported": len(events)})
 
 
@@ -720,8 +735,7 @@ def import_file(path):
     init_db()
     with open(path, "rb") as file:
         events = parse_import_text(decode_bytes(file.read()))
-    for event in events:
-        upsert_event(event)
+    upsert_events(events)
     print(f"{len(events)} eventos importados ou atualizados.")
     print(f"Banco: {database_url()}")
 
