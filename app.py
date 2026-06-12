@@ -13,6 +13,12 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DATA_DIR = os.path.join(BASE_DIR, "data")
 SQLITE_PATH = os.path.join(DATA_DIR, "ps_plus.db")
 CATEGORIES = ("Essential", "Extra", "Deluxe")
+MONTH_NUMBERS = {
+    "janeiro": 1, "fevereiro": 2, "marco": 3, "março": 3,
+    "abril": 4, "maio": 5, "junho": 6, "julho": 7,
+    "agosto": 8, "setembro": 9, "outubro": 10,
+    "novembro": 11, "dezembro": 12,
+}
 
 
 app = Flask(__name__)
@@ -77,6 +83,8 @@ def init_db():
                     event_type TEXT NOT NULL CHECK(event_type IN ('Entrada', 'Saida')),
                     category TEXT NOT NULL DEFAULT '',
                     period TEXT NOT NULL,
+                    event_year INTEGER NOT NULL DEFAULT 0,
+                    event_month INTEGER NOT NULL DEFAULT 0,
                     event_date TEXT,
                     notes TEXT,
                     created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -100,6 +108,8 @@ def init_db():
 
         if is_postgres():
             execute(conn, "ALTER TABLE games ADD COLUMN IF NOT EXISTS cover_url TEXT NOT NULL DEFAULT ''")
+            execute(conn, "ALTER TABLE events ADD COLUMN IF NOT EXISTS event_year INTEGER NOT NULL DEFAULT 0")
+            execute(conn, "ALTER TABLE events ADD COLUMN IF NOT EXISTS event_month INTEGER NOT NULL DEFAULT 0")
         else:
             columns = execute(conn, "PRAGMA table_info(games)").fetchall()
             if "cover_url" not in {column["name"] for column in columns}:
@@ -113,6 +123,8 @@ def init_db():
                     event_type TEXT NOT NULL CHECK(event_type IN ('Entrada', 'Saida')),
                     category TEXT NOT NULL DEFAULT '',
                     period TEXT NOT NULL,
+                    event_year INTEGER NOT NULL DEFAULT 0,
+                    event_month INTEGER NOT NULL DEFAULT 0,
                     event_date TEXT,
                     notes TEXT,
                     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -120,6 +132,24 @@ def init_db():
                     UNIQUE(game_id, event_type, category, period)
                 )
                 """,
+            )
+            event_columns = execute(conn, "PRAGMA table_info(events)").fetchall()
+            event_column_names = {column["name"] for column in event_columns}
+            if "event_year" not in event_column_names:
+                execute(conn, "ALTER TABLE events ADD COLUMN event_year INTEGER NOT NULL DEFAULT 0")
+            if "event_month" not in event_column_names:
+                execute(conn, "ALTER TABLE events ADD COLUMN event_month INTEGER NOT NULL DEFAULT 0")
+
+        missing_periods = execute(
+            conn,
+            "SELECT id, period FROM events WHERE event_year = 0 OR event_month = 0",
+        ).fetchall()
+        for event in missing_periods:
+            event_year, event_month = period_parts(event["period"])
+            execute(
+                conn,
+                "UPDATE events SET event_year = ?, event_month = ? WHERE id = ?",
+                (event_year, event_month, event["id"]),
             )
 
 
@@ -173,7 +203,14 @@ def clean_title(title):
         flags=re.I,
     )
     title = re.sub(r"\s+", " ", title)
-    return title.strip(" -:;")
+    return title.strip(" -:;").upper()
+
+
+def period_parts(period):
+    match = re.search(r"([A-Za-zÀ-ÿ]+)\s+(\d{4})", period or "", flags=re.I)
+    if not match:
+        return 0, 0
+    return int(match.group(2)), MONTH_NUMBERS.get(match.group(1).lower(), 0)
 
 
 def split_title_and_notes(line):
@@ -271,13 +308,14 @@ def prepare_event(payload):
         raise ValueError("Informe o mes/ano do evento.")
 
     cover_url = (payload.get("cover_url") or "").strip()
-    return title, event_type, category, period, event_date, notes, cover_url
+    event_year, event_month = period_parts(period)
+    return title, event_type, category, period, event_date, notes, cover_url, event_year, event_month
 
 
 def upsert_event_with_connection(conn, payload):
-    title, event_type, category, period, event_date, notes, cover_url = prepare_event(payload)
+    title, event_type, category, period, event_date, notes, cover_url, event_year, event_month = prepare_event(payload)
 
-    row = execute(conn, "SELECT id FROM games WHERE title = ?", (title,)).fetchone()
+    row = execute(conn, "SELECT id FROM games WHERE UPPER(title) = ? ORDER BY id LIMIT 1", (title,)).fetchone()
     if row:
         game_id = row["id"]
         if cover_url:
@@ -299,17 +337,17 @@ def upsert_event_with_connection(conn, payload):
     if existing:
         execute(
             conn,
-            "UPDATE events SET event_date = ?, notes = ? WHERE id = ?",
-            (event_date, notes, existing["id"]),
+            "UPDATE events SET event_date = ?, notes = ?, event_year = ?, event_month = ? WHERE id = ?",
+            (event_date, notes, event_year, event_month, existing["id"]),
         )
     else:
         execute(
             conn,
             """
-            INSERT INTO events (game_id, event_type, category, period, event_date, notes)
-            VALUES (?, ?, ?, ?, ?, ?)
+            INSERT INTO events (game_id, event_type, category, period, event_year, event_month, event_date, notes)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             """,
-            (game_id, event_type, category, period, event_date, notes),
+            (game_id, event_type, category, period, event_year, event_month, event_date, notes),
         )
     return game_id
 
@@ -329,7 +367,7 @@ def latest_games(filters):
     clauses = []
     params = []
     if filters.get("q"):
-        clauses.append("g.title LIKE ?")
+        clauses.append("UPPER(g.title) LIKE UPPER(?)")
         params.append(f"%{filters['q']}%")
     if filters.get("category"):
         clauses.append("latest.category = ?")
@@ -344,9 +382,9 @@ def latest_games(filters):
         "title": "g.title",
         "status": "latest.event_type",
         "category": "latest.category",
-        "period": "latest.id",
+        "period": "latest.event_year",
     }
-    sort_column = sort_map.get(filters.get("sort"), "g.title")
+    sort_column = sort_map.get(filters.get("sort"), "latest.event_year")
     sort_direction = "DESC" if filters.get("direction") == "desc" else "ASC"
     page = max(int(filters.get("page") or 1), 1)
     per_page = min(max(int(filters.get("per_page") or 25), 5), 100)
@@ -374,7 +412,7 @@ def latest_games(filters):
             )
             SELECT
                 g.id,
-                g.title,
+                UPPER(g.title) AS title,
                 g.cover_url,
                 latest.id AS event_id,
                 latest.event_type,
@@ -387,7 +425,17 @@ def latest_games(filters):
             FROM games g
             JOIN latest ON latest.game_id = g.id
             {where}
-            ORDER BY {sort_column} {sort_direction}, g.title ASC
+            ORDER BY
+                {sort_column} {sort_direction},
+                latest.event_month {sort_direction},
+                CASE
+                    WHEN latest.event_type = 'Saida' THEN 4
+                    WHEN latest.category = 'Essential' THEN 1
+                    WHEN latest.category = 'Extra' THEN 2
+                    WHEN latest.category = 'Deluxe' THEN 3
+                    ELSE 5
+                END ASC,
+                g.title ASC
             LIMIT ? OFFSET ?
             """,
             [*params, per_page, offset],
@@ -402,13 +450,13 @@ def latest_games(filters):
 
 
 def update_event(event_id, payload):
-    title, event_type, category, period, event_date, notes, cover_url = prepare_event(payload)
+    title, event_type, category, period, event_date, notes, cover_url, event_year, event_month = prepare_event(payload)
     with connect() as conn:
         event = execute(conn, "SELECT game_id FROM events WHERE id = ?", (event_id,)).fetchone()
         if not event:
             raise ValueError("Evento nao encontrado.")
         game_id = event["game_id"]
-        duplicate = execute(conn, "SELECT id FROM games WHERE title = ? AND id <> ?", (title, game_id)).fetchone()
+        duplicate = execute(conn, "SELECT id FROM games WHERE UPPER(title) = ? AND id <> ?", (title, game_id)).fetchone()
         if duplicate:
             raise ValueError("Ja existe outro jogo com esse nome.")
         execute(
@@ -418,8 +466,8 @@ def update_event(event_id, payload):
         )
         execute(
             conn,
-            "UPDATE events SET event_type = ?, category = ?, period = ?, event_date = ?, notes = ? WHERE id = ?",
-            (event_type, category, period, event_date, notes, event_id),
+            "UPDATE events SET event_type = ?, category = ?, period = ?, event_year = ?, event_month = ?, event_date = ?, notes = ? WHERE id = ?",
+            (event_type, category, period, event_year, event_month, event_date, notes, event_id),
         )
 
 
@@ -428,7 +476,7 @@ def history_for_game(game_id):
         rows = execute(
             conn,
             """
-            SELECT e.*, g.title
+            SELECT e.*, UPPER(g.title) AS title
             FROM events e
             JOIN games g ON g.id = e.game_id
             WHERE e.game_id = ?
@@ -602,8 +650,8 @@ INDEX_HTML = r"""<!doctype html>
       <input id="search" placeholder="Buscar jogo">
       <select id="filterCategory"><option value="">Todas as categorias</option><option>Essential</option><option>Extra</option><option>Deluxe</option></select>
       <select id="filterStatus"><option value="">Todos</option><option>Ativo</option><option>Saiu</option></select>
-      <select id="sort"><option value="title">Ordenar por nome</option><option value="status">Ordenar por status</option><option value="category">Ordenar por categoria</option><option value="period">Ordenar por mes</option></select>
-      <select id="direction"><option value="asc">Crescente</option><option value="desc">Decrescente</option></select>
+      <select id="sort"><option value="period" selected>Ordenar por mes e plano</option><option value="title">Ordenar por nome</option><option value="status">Ordenar por status</option><option value="category">Ordenar por categoria</option></select>
+      <select id="direction"><option value="desc" selected>Mais recentes</option><option value="asc">Mais antigos</option></select>
       <select id="perPage"><option value="10">10 por pagina</option><option value="25" selected>25 por pagina</option><option value="50">50 por pagina</option><option value="100">100 por pagina</option></select>
     </section>
     <section class="stats" id="stats"></section>
@@ -871,8 +919,8 @@ def api_games():
         "q": request.args.get("q", "").strip(),
         "category": normalize_category(request.args.get("category", "")),
         "status": request.args.get("status", "").strip(),
-        "sort": request.args.get("sort", "title").strip(),
-        "direction": request.args.get("direction", "asc").strip(),
+        "sort": request.args.get("sort", "period").strip(),
+        "direction": request.args.get("direction", "desc").strip(),
         "page": request.args.get("page", "1"),
         "per_page": request.args.get("per_page", "25"),
     }
