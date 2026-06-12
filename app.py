@@ -62,6 +62,7 @@ def init_db():
                 CREATE TABLE IF NOT EXISTS games (
                     id SERIAL PRIMARY KEY,
                     title TEXT NOT NULL UNIQUE,
+                    cover_url TEXT NOT NULL DEFAULT '',
                     created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
                     updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
                 )
@@ -90,11 +91,19 @@ def init_db():
                 CREATE TABLE IF NOT EXISTS games (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     title TEXT NOT NULL UNIQUE,
+                    cover_url TEXT NOT NULL DEFAULT '',
                     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
                     updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
                 )
                 """,
             )
+
+        if is_postgres():
+            execute(conn, "ALTER TABLE games ADD COLUMN IF NOT EXISTS cover_url TEXT NOT NULL DEFAULT ''")
+        else:
+            columns = execute(conn, "PRAGMA table_info(games)").fetchall()
+            if "cover_url" not in {column["name"] for column in columns}:
+                execute(conn, "ALTER TABLE games ADD COLUMN cover_url TEXT NOT NULL DEFAULT ''")
             execute(
                 conn,
                 """
@@ -261,18 +270,22 @@ def prepare_event(payload):
     if not period:
         raise ValueError("Informe o mes/ano do evento.")
 
-    return title, event_type, category, period, event_date, notes
+    cover_url = (payload.get("cover_url") or "").strip()
+    return title, event_type, category, period, event_date, notes, cover_url
 
 
 def upsert_event_with_connection(conn, payload):
-    title, event_type, category, period, event_date, notes = prepare_event(payload)
+    title, event_type, category, period, event_date, notes, cover_url = prepare_event(payload)
 
     row = execute(conn, "SELECT id FROM games WHERE title = ?", (title,)).fetchone()
     if row:
         game_id = row["id"]
-        execute(conn, "UPDATE games SET updated_at = CURRENT_TIMESTAMP WHERE id = ?", (game_id,))
+        if cover_url:
+            execute(conn, "UPDATE games SET cover_url = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?", (cover_url, game_id))
+        else:
+            execute(conn, "UPDATE games SET updated_at = CURRENT_TIMESTAMP WHERE id = ?", (game_id,))
     else:
-        execute(conn, "INSERT INTO games (title) VALUES (?)", (title,))
+        execute(conn, "INSERT INTO games (title, cover_url) VALUES (?, ?)", (title, cover_url))
         game_id = execute(conn, "SELECT id FROM games WHERE title = ?", (title,)).fetchone()["id"]
 
     existing = execute(
@@ -327,7 +340,30 @@ def latest_games(filters):
         clauses.append("latest.event_type = 'Saida'")
 
     where = "WHERE " + " AND ".join(clauses) if clauses else ""
+    sort_map = {
+        "title": "g.title",
+        "status": "latest.event_type",
+        "category": "latest.category",
+        "period": "latest.id",
+    }
+    sort_column = sort_map.get(filters.get("sort"), "g.title")
+    sort_direction = "DESC" if filters.get("direction") == "desc" else "ASC"
+    page = max(int(filters.get("page") or 1), 1)
+    per_page = min(max(int(filters.get("per_page") or 25), 5), 100)
+    offset = (page - 1) * per_page
+
     with connect() as conn:
+        total = execute(
+            conn,
+            f"""
+            WITH latest AS (
+                SELECT e.* FROM events e
+                JOIN (SELECT game_id, MAX(id) AS id FROM events GROUP BY game_id) x ON x.id = e.id
+            )
+            SELECT COUNT(*) AS total FROM games g JOIN latest ON latest.game_id = g.id {where}
+            """,
+            params,
+        ).fetchone()["total"]
         rows = execute(
             conn,
             f"""
@@ -339,6 +375,8 @@ def latest_games(filters):
             SELECT
                 g.id,
                 g.title,
+                g.cover_url,
+                latest.id AS event_id,
                 latest.event_type,
                 CASE WHEN latest.event_type = 'Entrada' THEN 'Ativo' ELSE 'Saiu' END AS status,
                 latest.category,
@@ -349,11 +387,40 @@ def latest_games(filters):
             FROM games g
             JOIN latest ON latest.game_id = g.id
             {where}
-            ORDER BY CASE latest.event_type WHEN 'Entrada' THEN 1 ELSE 2 END, g.title
+            ORDER BY {sort_column} {sort_direction}, g.title ASC
+            LIMIT ? OFFSET ?
             """,
-            params,
+            [*params, per_page, offset],
         ).fetchall()
-    return [row_to_dict(row) for row in rows]
+    return {
+        "items": [row_to_dict(row) for row in rows],
+        "page": page,
+        "per_page": per_page,
+        "total": total,
+        "pages": max((total + per_page - 1) // per_page, 1),
+    }
+
+
+def update_event(event_id, payload):
+    title, event_type, category, period, event_date, notes, cover_url = prepare_event(payload)
+    with connect() as conn:
+        event = execute(conn, "SELECT game_id FROM events WHERE id = ?", (event_id,)).fetchone()
+        if not event:
+            raise ValueError("Evento nao encontrado.")
+        game_id = event["game_id"]
+        duplicate = execute(conn, "SELECT id FROM games WHERE title = ? AND id <> ?", (title, game_id)).fetchone()
+        if duplicate:
+            raise ValueError("Ja existe outro jogo com esse nome.")
+        execute(
+            conn,
+            "UPDATE games SET title = ?, cover_url = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+            (title, cover_url, game_id),
+        )
+        execute(
+            conn,
+            "UPDATE events SET event_type = ?, category = ?, period = ?, event_date = ?, notes = ? WHERE id = ?",
+            (event_type, category, period, event_date, notes, event_id),
+        )
 
 
 def history_for_game(game_id):
@@ -460,12 +527,17 @@ INDEX_HTML = r"""<!doctype html>
     header p { margin: 8px 0 0; color: #cbd5e1; max-width: 840px; }
     header a { color: white; text-decoration: none; border: 1px solid #475467; border-radius: 8px; padding: 8px 12px; }
     main { width: min(1200px, 100%); margin: 0 auto; padding: 20px clamp(12px, 3vw, 28px) 44px; }
-    .toolbar { display: grid; grid-template-columns: 1fr 160px 140px; gap: 10px; margin-bottom: 16px; }
+    .toolbar { display: grid; grid-template-columns: minmax(220px, 1fr) repeat(5, minmax(110px, 155px)); gap: 10px; margin-bottom: 16px; }
     input, select, textarea, button { font: inherit; border: 1px solid var(--line); border-radius: 8px; min-height: 42px; }
     input, select, textarea { width: 100%; padding: 9px 11px; background: white; color: var(--ink); }
     textarea { min-height: 74px; resize: vertical; }
     button { background: var(--blue); color: white; border-color: var(--blue); padding: 9px 14px; cursor: pointer; font-weight: 700; }
     button.secondary { background: white; color: var(--blue); border-color: #b8c9f4; }
+    button:disabled { opacity: .6; cursor: wait; }
+    .icon-actions { display: flex; gap: 6px; flex-wrap: nowrap; }
+    .icon-button { width: 34px; height: 34px; min-height: 34px; padding: 0; display: inline-grid; place-items: center; background: white; color: var(--blue); border-color: #c8d4eb; }
+    .icon-button.danger { color: var(--rose); border-color: #efc3d0; }
+    .icon-button svg { width: 17px; height: 17px; }
     .grid { display: grid; grid-template-columns: minmax(310px, 390px) 1fr; gap: 18px; align-items: start; }
     .panel { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; box-shadow: var(--shadow); padding: 16px; }
     h2 { margin: 0 0 14px; font-size: 18px; letter-spacing: 0; }
@@ -497,6 +569,12 @@ INDEX_HTML = r"""<!doctype html>
     @keyframes processing { 0% { transform: translateX(-100%); } 100% { transform: translateX(230%); } }
     .history { margin-top: 16px; }
     .history-item { border-top: 1px solid var(--line); padding: 10px 0; }
+    .game-cell { display: grid; grid-template-columns: 44px minmax(0, 1fr); gap: 10px; align-items: start; min-width: 230px; }
+    .cover { width: 44px; height: 58px; object-fit: cover; border: 1px solid var(--line); border-radius: 4px; background: #edf1f7; }
+    .cover-placeholder { width: 44px; height: 58px; display: grid; place-items: center; border: 1px solid var(--line); border-radius: 4px; background: #edf1f7; color: var(--muted); }
+    .game-title { white-space: normal; overflow-wrap: anywhere; line-height: 1.3; }
+    .pagination { display: flex; justify-content: space-between; align-items: center; gap: 12px; margin-top: 12px; color: var(--muted); font-size: 14px; }
+    .pagination-actions { display: flex; gap: 6px; }
     @media (max-width: 900px) {
       .top { align-items: flex-start; }
       .grid, .toolbar, .stats, .row { grid-template-columns: 1fr; }
@@ -507,6 +585,7 @@ INDEX_HTML = r"""<!doctype html>
       td[data-label]::before { content: attr(data-label) ": "; color: var(--muted); font-weight: 800; }
     }
   </style>
+  <script src="https://unpkg.com/lucide@0.468.0/dist/umd/lucide.min.js"></script>
 </head>
 <body>
   <header>
@@ -523,14 +602,20 @@ INDEX_HTML = r"""<!doctype html>
       <input id="search" placeholder="Buscar jogo">
       <select id="filterCategory"><option value="">Todas as categorias</option><option>Essential</option><option>Extra</option><option>Deluxe</option></select>
       <select id="filterStatus"><option value="">Todos</option><option>Ativo</option><option>Saiu</option></select>
+      <select id="sort"><option value="title">Ordenar por nome</option><option value="status">Ordenar por status</option><option value="category">Ordenar por categoria</option><option value="period">Ordenar por mes</option></select>
+      <select id="direction"><option value="asc">Crescente</option><option value="desc">Decrescente</option></select>
+      <select id="perPage"><option value="10">10 por pagina</option><option value="25" selected>25 por pagina</option><option value="50">50 por pagina</option><option value="100">100 por pagina</option></select>
     </section>
     <section class="stats" id="stats"></section>
     <section class="grid">
       <aside class="panel">
         <h2>Registrar evento</h2>
         <form id="eventForm">
+          <input type="hidden" id="eventId">
           <label for="title">Jogo</label>
           <input id="title" required placeholder="Ex.: God of War">
+          <label for="coverUrl">URL da capa</label>
+          <input id="coverUrl" type="url" placeholder="https://.../capa.jpg">
           <div class="row">
             <div><label for="eventType">Evento</label><select id="eventType"><option>Entrada</option><option>Saida</option></select></div>
             <div><label for="category">Categoria</label><select id="category"><option>Essential</option><option>Extra</option><option>Deluxe</option></select></div>
@@ -541,7 +626,7 @@ INDEX_HTML = r"""<!doctype html>
           </div>
           <label for="notes">Notas</label>
           <textarea id="notes" placeholder="Plataformas, fonte ou observacoes"></textarea>
-          <div class="actions"><button type="submit">Salvar evento</button><button type="button" class="secondary" id="clearForm">Limpar</button></div>
+          <div class="actions"><button id="saveButton" type="submit">Salvar evento</button><button type="button" class="secondary" id="clearForm">Limpar</button></div>
         </form>
         <hr style="border:0;border-top:1px solid var(--line);margin:20px 0">
         <h2>Importar TXT</h2>
@@ -562,6 +647,8 @@ INDEX_HTML = r"""<!doctype html>
   <script>
     const $ = (id) => document.getElementById(id);
     let games = [];
+    let pageInfo = { page: 1, pages: 1, total: 0 };
+    let currentPage = 1;
     const defaultPeriod = new Intl.DateTimeFormat('pt-BR', { month: 'long', year: 'numeric' }).format(new Date()).replace(/^./, c => c.toUpperCase());
     $('period').value = defaultPeriod;
     async function api(path, options = {}) {
@@ -579,10 +666,16 @@ INDEX_HTML = r"""<!doctype html>
       if ($('search').value) query.set('q', $('search').value);
       if ($('filterCategory').value) query.set('category', $('filterCategory').value);
       if ($('filterStatus').value) query.set('status', $('filterStatus').value);
+      query.set('sort', $('sort').value);
+      query.set('direction', $('direction').value);
+      query.set('page', currentPage);
+      query.set('per_page', $('perPage').value);
       return query.toString();
     }
     async function loadGames() {
-      games = await api('/api/games?' + queryString());
+      const result = await api('/api/games?' + queryString());
+      games = result.items;
+      pageInfo = result;
       renderStats(await api('/api/stats'));
       renderTable();
     }
@@ -595,24 +688,28 @@ INDEX_HTML = r"""<!doctype html>
       $('tableWrap').innerHTML = `<table><thead><tr><th>Jogo</th><th>Status</th><th>Categoria</th><th>Mes</th><th>Historico</th><th>Acoes</th></tr></thead><tbody>` +
         games.map((game) => `
           <tr>
-            <td data-label="Jogo"><strong>${escapeHtml(game.title)}</strong><br><small>${escapeHtml(game.notes || '')}</small></td>
+            <td data-label="Jogo"><div class="game-cell">${game.cover_url ? `<img class="cover" src="${escapeHtml(game.cover_url)}" alt="Capa de ${escapeHtml(game.title)}" loading="lazy" onerror="this.style.display='none';this.nextElementSibling.style.display='grid'">` : ''}<span class="cover-placeholder" style="${game.cover_url ? 'display:none' : ''}"><i data-lucide="image">□</i></span><div><strong class="game-title">${escapeHtml(game.title)}</strong><br><small>${escapeHtml(game.notes || '')}</small></div></div></td>
             <td data-label="Status"><span class="pill ${game.status}">${game.status}</span></td>
             <td data-label="Categoria">${game.category ? `<span class="pill ${game.category}">${game.category}</span>` : '-'}</td>
             <td data-label="Mes">${escapeHtml(game.period || '-')}</td>
             <td data-label="Historico">${game.history_count} evento(s)</td>
-            <td data-label="Acoes"><button class="secondary" type="button" onclick="markEntry(${game.id})">Entrada</button> <button class="secondary" type="button" onclick="markExit(${game.id})">Saida</button> <button class="secondary" type="button" onclick="showHistory(${game.id})">Historico</button></td>
-          </tr>`).join('') + '</tbody></table>';
+            <td data-label="Acoes"><div class="icon-actions"><button class="icon-button" type="button" title="Editar evento atual" aria-label="Editar evento atual" onclick="editCurrent(${game.id})"><i data-lucide="pencil">✎</i></button><button class="icon-button" type="button" title="Registrar entrada" aria-label="Registrar entrada" onclick="markEntry(${game.id})"><i data-lucide="log-in">→</i></button><button class="icon-button danger" type="button" title="Registrar saida" aria-label="Registrar saida" onclick="markExit(${game.id})"><i data-lucide="log-out">←</i></button><button class="icon-button" type="button" title="Ver historico" aria-label="Ver historico" onclick="showHistory(${game.id})"><i data-lucide="history">↺</i></button></div></td>
+          </tr>`).join('') + `</tbody></table><div class="pagination"><span>Pagina ${pageInfo.page} de ${pageInfo.pages} - ${pageInfo.total} jogos</span><div class="pagination-actions"><button class="icon-button" title="Pagina anterior" aria-label="Pagina anterior" ${pageInfo.page <= 1 ? 'disabled' : ''} onclick="changePage(-1)"><i data-lucide="chevron-left">‹</i></button><button class="icon-button" title="Proxima pagina" aria-label="Proxima pagina" ${pageInfo.page >= pageInfo.pages ? 'disabled' : ''} onclick="changePage(1)"><i data-lucide="chevron-right">›</i></button></div></div>`;
+      if (window.lucide) lucide.createIcons();
     }
     function clearForm() {
       $('eventForm').reset();
+      $('eventId').value = '';
       $('eventType').value = 'Entrada';
       $('category').disabled = false;
       $('period').value = defaultPeriod;
+      $('saveButton').textContent = 'Salvar evento';
     }
     function fillFromGame(id, eventType) {
       const game = games.find(item => item.id === id);
       if (!game) return;
       $('title').value = game.title;
+      $('coverUrl').value = game.cover_url || '';
       $('eventType').value = eventType;
       $('category').value = game.category || 'Extra';
       $('category').disabled = eventType === 'Saida';
@@ -620,6 +717,27 @@ INDEX_HTML = r"""<!doctype html>
       $('eventDate').value = '';
       $('notes').value = '';
       window.scrollTo({ top: 0, behavior: 'smooth' });
+    }
+    window.editCurrent = function(id) {
+      const game = games.find(item => item.id === id);
+      if (!game) return;
+      $('eventId').value = game.event_id;
+      $('title').value = game.title;
+      $('coverUrl').value = game.cover_url || '';
+      $('eventType').value = game.event_type;
+      $('category').value = game.category || 'Extra';
+      $('category').disabled = game.event_type === 'Saida';
+      $('period').value = game.period || defaultPeriod;
+      $('eventDate').value = game.event_date || '';
+      $('notes').value = game.notes || '';
+      $('saveButton').textContent = 'Salvar alteracoes';
+      window.scrollTo({ top: 0, behavior: 'smooth' });
+    }
+    window.changePage = function(delta) {
+      const next = currentPage + delta;
+      if (next < 1 || next > pageInfo.pages) return;
+      currentPage = next;
+      loadGames();
     }
     window.markEntry = (id) => fillFromGame(id, 'Entrada');
     window.markExit = (id) => fillFromGame(id, 'Saida');
@@ -638,8 +756,9 @@ INDEX_HTML = r"""<!doctype html>
     $('eventType').addEventListener('change', () => { $('category').disabled = $('eventType').value === 'Saida'; });
     $('eventForm').addEventListener('submit', async (event) => {
       event.preventDefault();
-      await api('/api/events', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({
-        title: $('title').value, event_type: $('eventType').value, category: $('category').value, period: $('period').value, event_date: $('eventDate').value, notes: $('notes').value
+      const eventId = $('eventId').value;
+      await api(eventId ? '/api/events/' + eventId : '/api/events', { method: eventId ? 'PUT' : 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({
+        title: $('title').value, cover_url: $('coverUrl').value, event_type: $('eventType').value, category: $('category').value, period: $('period').value, event_date: $('eventDate').value, notes: $('notes').value
       })});
       clearForm();
       await loadGames();
@@ -703,9 +822,9 @@ INDEX_HTML = r"""<!doctype html>
         button.textContent = 'Importar';
       }
     });
-    ['search', 'filterCategory', 'filterStatus'].forEach((id) => {
-      $(id).addEventListener('input', loadGames);
-      $(id).addEventListener('change', loadGames);
+    ['search', 'filterCategory', 'filterStatus', 'sort', 'direction', 'perPage'].forEach((id) => {
+      $(id).addEventListener('input', () => { currentPage = 1; loadGames(); });
+      $(id).addEventListener('change', () => { currentPage = 1; loadGames(); });
     });
     $('clearForm').addEventListener('click', clearForm);
     loadGames();
@@ -752,6 +871,10 @@ def api_games():
         "q": request.args.get("q", "").strip(),
         "category": normalize_category(request.args.get("category", "")),
         "status": request.args.get("status", "").strip(),
+        "sort": request.args.get("sort", "title").strip(),
+        "direction": request.args.get("direction", "asc").strip(),
+        "page": request.args.get("page", "1"),
+        "per_page": request.args.get("per_page", "25"),
     }
     return jsonify(latest_games(filters))
 
@@ -774,6 +897,16 @@ def api_events():
     try:
         game_id = upsert_event(request.get_json(force=True))
         return jsonify({"ok": True, "game_id": game_id}), 201
+    except Exception as exc:
+        return jsonify({"error": str(exc)}), 400
+
+
+@app.route("/api/events/<int:event_id>", methods=["PUT"])
+@login_required
+def api_update_event(event_id):
+    try:
+        update_event(event_id, request.get_json(force=True))
+        return jsonify({"ok": True})
     except Exception as exc:
         return jsonify({"error": str(exc)}), 400
 
