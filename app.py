@@ -669,7 +669,6 @@ INDEX_HTML = r"""<!doctype html>
     .icon-button { width: 34px; height: 34px; min-height: 34px; padding: 0; display: inline-grid; place-items: center; background: white; color: var(--blue); border-color: #c8d4eb; }
     .icon-button.danger { color: var(--rose); border-color: #efc3d0; }
     .icon-button svg { width: 17px; height: 17px; }
-    .grid { display: grid; grid-template-columns: minmax(310px, 390px) 1fr; gap: 18px; align-items: start; }
     .panel { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; box-shadow: var(--shadow); padding: 16px; }
     h2 { margin: 0 0 14px; font-size: 18px; letter-spacing: 0; }
     label { display: block; color: var(--muted); font-size: 13px; font-weight: 700; margin: 12px 0 6px; }
@@ -700,15 +699,28 @@ INDEX_HTML = r"""<!doctype html>
     @keyframes processing { 0% { transform: translateX(-100%); } 100% { transform: translateX(230%); } }
     .history { margin-top: 16px; }
     .history-item { border-top: 1px solid var(--line); padding: 10px 0; }
-    .game-cell { display: grid; grid-template-columns: 44px minmax(0, 1fr); gap: 10px; align-items: start; min-width: 230px; }
-    .cover { width: 44px; height: 58px; object-fit: cover; border: 1px solid var(--line); border-radius: 4px; background: #edf1f7; }
-    .cover-placeholder { width: 44px; height: 58px; display: grid; place-items: center; border: 1px solid var(--line); border-radius: 4px; background: #edf1f7; color: var(--muted); }
+    .game-cell { display: grid; grid-template-columns: 72px minmax(0, 1fr); gap: 12px; align-items: start; min-width: 270px; }
+    .cover { width: 72px; height: 96px; object-fit: cover; border: 1px solid var(--line); border-radius: 4px; background: #edf1f7; }
+    .cover-placeholder { width: 72px; height: 96px; display: grid; place-items: center; border: 1px solid var(--line); border-radius: 4px; background: #edf1f7; color: var(--muted); }
     .game-title { white-space: normal; overflow-wrap: anywhere; line-height: 1.3; }
     .pagination { display: flex; justify-content: space-between; align-items: center; gap: 12px; margin-top: 12px; color: var(--muted); font-size: 14px; }
     .pagination-actions { display: flex; gap: 6px; }
+    .content-actions { display: flex; justify-content: flex-end; gap: 10px; margin: 0 0 14px; }
+    dialog { width: min(520px, calc(100% - 24px)); max-height: calc(100vh - 32px); overflow: auto; border: 1px solid var(--line); border-radius: 8px; padding: 0; color: var(--ink); box-shadow: 0 24px 70px rgba(15, 23, 42, .25); }
+    dialog::backdrop { background: rgba(15, 23, 42, .58); }
+    .modal-head { position: sticky; top: 0; z-index: 1; display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 14px 16px; background: white; border-bottom: 1px solid var(--line); }
+    .modal-head h2 { margin: 0; }
+    .modal-body { padding: 16px; }
+    .modal-close { color: var(--muted); border-color: var(--line); }
+    .modal-tabs { display: flex; gap: 4px; padding: 0 16px; border-bottom: 1px solid var(--line); background: white; }
+    .modal-tab { min-height: 40px; padding: 8px 12px; border: 0; border-radius: 0; background: transparent; color: var(--muted); border-bottom: 2px solid transparent; }
+    .modal-tab.active { color: var(--blue); border-bottom-color: var(--blue); }
+    .tab-panel[hidden] { display: none; }
     @media (max-width: 900px) {
       .top { align-items: flex-start; }
-      .grid, .toolbar, .stats, .row { grid-template-columns: 1fr; }
+      .toolbar, .stats, .row { grid-template-columns: 1fr; }
+      .content-actions { justify-content: stretch; }
+      .content-actions button { flex: 1; }
       table, thead, tbody, tr, th, td { display: block; }
       thead { display: none; }
       tr { border-bottom: 1px solid var(--line); padding: 8px 0; }
@@ -738,9 +750,19 @@ INDEX_HTML = r"""<!doctype html>
       <select id="perPage"><option value="10">10 por pagina</option><option value="25" selected>25 por pagina</option><option value="50">50 por pagina</option><option value="100">100 por pagina</option></select>
     </section>
     <section class="stats" id="stats"></section>
-    <section class="grid">
-      <aside class="panel">
-        <h2>Registrar evento</h2>
+    <section class="content-actions">
+      <button type="button" id="openEvent"><i data-lucide="plus">+</i> Novo evento</button>
+      <button type="button" class="secondary" id="openImport"><i data-lucide="upload">↑</i> Importar TXT</button>
+    </section>
+    <section><div id="tableWrap"></div></section>
+
+    <dialog id="eventDialog">
+      <div class="modal-head"><h2 id="eventDialogTitle">Registrar evento</h2><button type="button" class="icon-button modal-close" data-close="eventDialog" title="Fechar" aria-label="Fechar"><i data-lucide="x">×</i></button></div>
+      <div class="modal-tabs">
+        <button type="button" class="modal-tab active" id="eventTabButton" data-tab="eventTabPanel">Evento</button>
+        <button type="button" class="modal-tab" id="historyTabButton" data-tab="historyTabPanel">Historico</button>
+      </div>
+      <div class="modal-body tab-panel" id="eventTabPanel">
         <form id="eventForm">
           <input type="hidden" id="eventId">
           <label for="title">Jogo</label>
@@ -759,8 +781,13 @@ INDEX_HTML = r"""<!doctype html>
           <textarea id="notes" placeholder="Plataformas, fonte ou observacoes"></textarea>
           <div class="actions"><button id="saveButton" type="submit">Salvar evento</button><button type="button" class="secondary" id="clearForm">Limpar</button></div>
         </form>
-        <hr style="border:0;border-top:1px solid var(--line);margin:20px 0">
-        <h2>Importar TXT</h2>
+      </div>
+      <div class="modal-body tab-panel" id="historyTabPanel" hidden><section class="history" id="historyPanel"></section></div>
+    </dialog>
+
+    <dialog id="importDialog">
+      <div class="modal-head"><h2>Importar TXT</h2><button type="button" class="icon-button modal-close" data-close="importDialog" title="Fechar" aria-label="Fechar"><i data-lucide="x">×</i></button></div>
+      <div class="modal-body">
         <form id="importForm">
           <input id="txtFile" type="file" accept=".txt,text/plain">
           <div class="actions"><button id="importButton" type="submit">Importar</button></div>
@@ -770,10 +797,9 @@ INDEX_HTML = r"""<!doctype html>
           </div>
           <div class="toast" id="toast"></div>
         </form>
-        <section class="history" id="historyPanel"></section>
-      </aside>
-      <section><div id="tableWrap"></div></section>
-    </section>
+      </div>
+    </dialog>
+
   </main>
   <script>
     const $ = (id) => document.getElementById(id);
@@ -828,6 +854,19 @@ INDEX_HTML = r"""<!doctype html>
           </tr>`).join('') + `</tbody></table><div class="pagination"><span>Pagina ${pageInfo.page} de ${pageInfo.pages} - ${pageInfo.total} jogos</span><div class="pagination-actions"><button class="icon-button" title="Pagina anterior" aria-label="Pagina anterior" ${pageInfo.page <= 1 ? 'disabled' : ''} onclick="changePage(-1)"><i data-lucide="chevron-left">‹</i></button><button class="icon-button" title="Proxima pagina" aria-label="Proxima pagina" ${pageInfo.page >= pageInfo.pages ? 'disabled' : ''} onclick="changePage(1)"><i data-lucide="chevron-right">›</i></button></div></div>`;
       if (window.lucide) lucide.createIcons();
     }
+    function activateEventTab(panelId) {
+      ['eventTabPanel', 'historyTabPanel'].forEach((id) => {
+        $(id).hidden = id !== panelId;
+      });
+      document.querySelectorAll('.modal-tab').forEach((button) => {
+        button.classList.toggle('active', button.dataset.tab === panelId);
+      });
+    }
+    function openEventDialog(panelId = 'eventTabPanel') {
+      activateEventTab(panelId);
+      if (!$('eventDialog').open) $('eventDialog').showModal();
+      if (window.lucide) lucide.createIcons();
+    }
     function clearForm() {
       $('eventForm').reset();
       $('eventId').value = '';
@@ -835,6 +874,10 @@ INDEX_HTML = r"""<!doctype html>
       $('category').disabled = false;
       $('period').value = defaultPeriod;
       $('saveButton').textContent = 'Salvar evento';
+      $('eventDialogTitle').textContent = 'Registrar evento';
+      $('historyTabButton').hidden = true;
+      $('historyPanel').innerHTML = '';
+      activateEventTab('eventTabPanel');
     }
     function fillFromGame(id, eventType) {
       const game = games.find(item => item.id === id);
@@ -847,7 +890,9 @@ INDEX_HTML = r"""<!doctype html>
       $('period').value = defaultPeriod;
       $('eventDate').value = '';
       $('notes').value = '';
-      window.scrollTo({ top: 0, behavior: 'smooth' });
+      $('eventDialogTitle').textContent = game.title;
+      $('historyTabButton').hidden = false;
+      openEventDialog('eventTabPanel');
     }
     window.editCurrent = function(id) {
       const game = games.find(item => item.id === id);
@@ -862,7 +907,9 @@ INDEX_HTML = r"""<!doctype html>
       $('eventDate').value = game.event_date || '';
       $('notes').value = game.notes || '';
       $('saveButton').textContent = 'Salvar alteracoes';
-      window.scrollTo({ top: 0, behavior: 'smooth' });
+      $('eventDialogTitle').textContent = game.title;
+      $('historyTabButton').hidden = false;
+      openEventDialog('eventTabPanel');
     }
     window.changePage = function(delta) {
       const next = currentPage + delta;
@@ -873,16 +920,19 @@ INDEX_HTML = r"""<!doctype html>
     window.markEntry = (id) => fillFromGame(id, 'Entrada');
     window.markExit = (id) => fillFromGame(id, 'Saida');
     window.showHistory = async function(id) {
+      const game = games.find(item => item.id === id);
       const items = await api('/api/games/' + id + '/events');
-      if (!items.length) return;
-      $('historyPanel').innerHTML = '<h2>Historico</h2>' + items.map((item) => `
+      $('eventDialogTitle').textContent = game ? game.title : 'Historico';
+      $('historyTabButton').hidden = false;
+      $('historyPanel').innerHTML = items.length ? items.map((item) => `
         <div class="history-item">
           <strong>${escapeHtml(item.title)}</strong><br>
           <span class="pill ${item.event_type}">${item.event_type}</span>
           ${item.category ? `<span class="pill ${item.category}">${item.category}</span>` : ''}
           <small>${escapeHtml(item.period)} ${item.event_date ? '- ' + escapeHtml(item.event_date) : ''}</small>
           ${item.notes ? `<br><small>${escapeHtml(item.notes)}</small>` : ''}
-        </div>`).join('');
+        </div>`).join('') : '<div class="empty">Nenhum evento no historico.</div>';
+      openEventDialog('historyTabPanel');
     }
     $('eventType').addEventListener('change', () => { $('category').disabled = $('eventType').value === 'Saida'; });
     $('eventForm').addEventListener('submit', async (event) => {
@@ -892,6 +942,7 @@ INDEX_HTML = r"""<!doctype html>
         title: $('title').value, cover_url: $('coverUrl').value, event_type: $('eventType').value, category: $('category').value, period: $('period').value, event_date: $('eventDate').value, notes: $('notes').value
       })});
       clearForm();
+      $('eventDialog').close();
       await loadGames();
     });
     $('importForm').addEventListener('submit', async (event) => {
@@ -976,7 +1027,20 @@ INDEX_HTML = r"""<!doctype html>
       $(id).addEventListener('input', () => { currentPage = 1; loadGames(); });
       $(id).addEventListener('change', () => { currentPage = 1; loadGames(); });
     });
+    document.querySelectorAll('[data-tab]').forEach((button) => {
+      button.addEventListener('click', () => activateEventTab(button.dataset.tab));
+    });
+    document.querySelectorAll('[data-close]').forEach((button) => {
+      button.addEventListener('click', () => $(button.dataset.close).close());
+    });
+    $('openEvent').addEventListener('click', () => { clearForm(); openEventDialog('eventTabPanel'); });
+    $('openImport').addEventListener('click', () => {
+      if (!$('importDialog').open) $('importDialog').showModal();
+      if (window.lucide) lucide.createIcons();
+    });
     $('clearForm').addEventListener('click', clearForm);
+    clearForm();
+    if (window.lucide) lucide.createIcons();
     loadGames();
   </script>
 </body>
