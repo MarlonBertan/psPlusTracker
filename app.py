@@ -700,7 +700,8 @@ INDEX_HTML = r"""<!doctype html>
     .history { margin-top: 16px; }
     .history-item { border-top: 1px solid var(--line); padding: 10px 0; }
     .game-cell { display: grid; grid-template-columns: 72px minmax(0, 1fr); gap: 12px; align-items: start; min-width: 270px; }
-    .cover { width: 72px; height: 96px; object-fit: cover; border: 1px solid var(--line); border-radius: 4px; background: #edf1f7; }
+    .cover { width: 72px; height: 96px; object-fit: contain; border: 1px solid var(--line); border-radius: 4px; background: #f8fafc; cursor: zoom-in; }
+    .cover:hover { border-color: var(--blue); box-shadow: 0 4px 14px rgba(19, 85, 216, .16); }
     .cover-placeholder { width: 72px; height: 96px; display: grid; place-items: center; border: 1px solid var(--line); border-radius: 4px; background: #edf1f7; color: var(--muted); }
     .game-title { white-space: normal; overflow-wrap: anywhere; line-height: 1.3; }
     .pagination { display: flex; justify-content: space-between; align-items: center; gap: 12px; margin-top: 12px; color: var(--muted); font-size: 14px; }
@@ -716,6 +717,8 @@ INDEX_HTML = r"""<!doctype html>
     .modal-tab { min-height: 40px; padding: 8px 12px; border: 0; border-radius: 0; background: transparent; color: var(--muted); border-bottom: 2px solid transparent; }
     .modal-tab.active { color: var(--blue); border-bottom-color: var(--blue); }
     .tab-panel[hidden] { display: none; }
+    #coverDialog { width: min(560px, calc(100% - 24px)); }
+    .cover-preview { display: block; width: 100%; max-height: calc(100vh - 150px); object-fit: contain; background: #f8fafc; }
     @media (max-width: 900px) {
       .top { align-items: flex-start; }
       .toolbar, .stats, .row { grid-template-columns: 1fr; }
@@ -800,6 +803,11 @@ INDEX_HTML = r"""<!doctype html>
       </div>
     </dialog>
 
+    <dialog id="coverDialog">
+      <div class="modal-head"><h2 id="coverDialogTitle">Capa do jogo</h2><button type="button" class="icon-button modal-close" data-close="coverDialog" title="Fechar" aria-label="Fechar"><i data-lucide="x">×</i></button></div>
+      <div class="modal-body"><img id="coverPreview" class="cover-preview" alt="Capa ampliada"></div>
+    </dialog>
+
   </main>
   <script>
     const $ = (id) => document.getElementById(id);
@@ -845,7 +853,7 @@ INDEX_HTML = r"""<!doctype html>
       $('tableWrap').innerHTML = `<table><thead><tr><th>Jogo</th><th>Status</th><th>Categoria</th><th>Mes</th><th>Historico</th><th>Acoes</th></tr></thead><tbody>` +
         games.map((game) => `
           <tr>
-            <td data-label="Jogo"><div class="game-cell">${game.cover_url ? `<img class="cover" src="${escapeHtml(game.cover_url)}" alt="Capa de ${escapeHtml(game.title)}" loading="lazy" onerror="this.style.display='none';this.nextElementSibling.style.display='grid'">` : ''}<span class="cover-placeholder" style="${game.cover_url ? 'display:none' : ''}"><i data-lucide="image">□</i></span><div><strong class="game-title">${escapeHtml(game.title)}</strong><br><small>${escapeHtml(game.notes || '')}</small></div></div></td>
+            <td data-label="Jogo"><div class="game-cell">${game.cover_url ? `<img class="cover" src="${escapeHtml(game.cover_url)}" alt="Capa de ${escapeHtml(game.title)}" loading="lazy" role="button" tabindex="0" data-cover-url="${escapeHtml(game.cover_url)}" data-cover-title="${escapeHtml(game.title)}" onerror="this.style.display='none';this.nextElementSibling.style.display='grid'">` : ''}<span class="cover-placeholder" style="${game.cover_url ? 'display:none' : ''}"><i data-lucide="image">□</i></span><div><strong class="game-title">${escapeHtml(game.title)}</strong><br><small>${escapeHtml(game.notes || '')}</small></div></div></td>
             <td data-label="Status"><span class="pill ${game.status}">${game.status}</span></td>
             <td data-label="Categoria">${game.category ? `<span class="pill ${game.category}">${game.category}</span>` : '-'}</td>
             <td data-label="Mes">${escapeHtml(game.period || '-')}</td>
@@ -916,6 +924,12 @@ INDEX_HTML = r"""<!doctype html>
       if (next < 1 || next > pageInfo.pages) return;
       currentPage = next;
       loadGames();
+    }
+    function openCoverPreview(image) {
+      $('coverDialogTitle').textContent = image.dataset.coverTitle || 'Capa do jogo';
+      $('coverPreview').src = image.dataset.coverUrl;
+      $('coverPreview').alt = `Capa ampliada de ${image.dataset.coverTitle || 'jogo'}`;
+      if (!$('coverDialog').open) $('coverDialog').showModal();
     }
     window.markEntry = (id) => fillFromGame(id, 'Entrada');
     window.markExit = (id) => fillFromGame(id, 'Saida');
@@ -1032,6 +1046,17 @@ INDEX_HTML = r"""<!doctype html>
     });
     document.querySelectorAll('[data-close]').forEach((button) => {
       button.addEventListener('click', () => $(button.dataset.close).close());
+    });
+    $('tableWrap').addEventListener('click', (event) => {
+      const image = event.target.closest('[data-cover-url]');
+      if (image) openCoverPreview(image);
+    });
+    $('tableWrap').addEventListener('keydown', (event) => {
+      const image = event.target.closest('[data-cover-url]');
+      if (image && (event.key === 'Enter' || event.key === ' ')) {
+        event.preventDefault();
+        openCoverPreview(image);
+      }
     });
     $('openEvent').addEventListener('click', () => { clearForm(); openEventDialog('eventTabPanel'); });
     $('openImport').addEventListener('click', () => {
