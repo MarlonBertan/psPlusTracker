@@ -699,10 +699,10 @@ INDEX_HTML = r"""<!doctype html>
     @keyframes processing { 0% { transform: translateX(-100%); } 100% { transform: translateX(230%); } }
     .history { margin-top: 16px; }
     .history-item { border-top: 1px solid var(--line); padding: 10px 0; }
-    .game-cell { display: grid; grid-template-columns: 72px minmax(0, 1fr); gap: 12px; align-items: start; min-width: 270px; }
-    .cover { width: 72px; height: 96px; object-fit: contain; border: 1px solid var(--line); border-radius: 4px; background: #f8fafc; cursor: zoom-in; }
+    .game-cell { display: grid; grid-template-columns: 96px minmax(0, 1fr); gap: 12px; align-items: start; min-width: 300px; }
+    .cover { width: 96px; height: 96px; object-fit: contain; border: 1px solid var(--line); border-radius: 4px; background: #f8fafc; cursor: zoom-in; }
     .cover:hover { border-color: var(--blue); box-shadow: 0 4px 14px rgba(19, 85, 216, .16); }
-    .cover-placeholder { width: 72px; height: 96px; display: grid; place-items: center; border: 1px solid var(--line); border-radius: 4px; background: #edf1f7; color: var(--muted); }
+    .cover-placeholder { width: 96px; height: 96px; display: grid; place-items: center; border: 1px solid var(--line); border-radius: 4px; background: #edf1f7; color: var(--muted); }
     .game-title { white-space: normal; overflow-wrap: anywhere; line-height: 1.3; }
     .pagination { display: flex; justify-content: space-between; align-items: center; gap: 12px; margin-top: 12px; color: var(--muted); font-size: 14px; }
     .pagination-actions { display: flex; gap: 6px; }
@@ -729,6 +729,8 @@ INDEX_HTML = r"""<!doctype html>
       tr { border-bottom: 1px solid var(--line); padding: 8px 0; }
       td { border: 0; padding: 6px 10px; }
       td[data-label]::before { content: attr(data-label) ": "; color: var(--muted); font-weight: 800; }
+      .game-cell { grid-template-columns: 82px minmax(0, 1fr); min-width: 0; }
+      .cover, .cover-placeholder { width: 82px; height: 82px; }
     }
   </style>
   <script src="https://unpkg.com/lucide@0.468.0/dist/umd/lucide.min.js"></script>
