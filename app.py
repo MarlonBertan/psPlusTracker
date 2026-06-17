@@ -674,6 +674,7 @@ INDEX_HTML = r"""<!doctype html>
     button:disabled { opacity: .6; cursor: wait; }
     .icon-actions { display: flex; gap: 6px; flex-wrap: nowrap; }
     .icon-button { width: 34px; height: 34px; min-height: 34px; padding: 0; display: inline-grid; place-items: center; background: white; color: var(--blue); border-color: #c8d4eb; }
+    .icon-button.exit-action { background: white; color: var(--blue); border-color: #c8d4eb; }
     .icon-button.danger { color: var(--rose); border-color: #efc3d0; }
     .icon-button svg { width: 17px; height: 17px; }
     .panel { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; box-shadow: var(--shadow); padding: 16px; }
@@ -868,7 +869,7 @@ INDEX_HTML = r"""<!doctype html>
             <td data-label="Categoria">${game.category ? `<span class="pill ${game.category}">${game.category}</span>` : '-'}</td>
             <td data-label="Mes">${escapeHtml(game.period || '-')}</td>
             <td data-label="Historico">${game.history_count} evento(s)</td>
-            <td data-label="Acoes"><div class="icon-actions"><button class="icon-button" type="button" title="Editar evento atual" aria-label="Editar evento atual" onclick="editCurrent(${game.id})"><i data-lucide="pencil">✎</i></button><button class="icon-button" type="button" title="Registrar entrada" aria-label="Registrar entrada" onclick="markEntry(${game.id})"><i data-lucide="log-in">→</i></button><button class="icon-button" type="button" title="Registrar saida" aria-label="Registrar saida" onclick="markExit(${game.id})"><i data-lucide="log-out">←</i></button><button class="icon-button" type="button" title="Ver historico" aria-label="Ver historico" onclick="showHistory(${game.id})"><i data-lucide="history">↺</i></button></div></td>
+            <td data-label="Acoes"><div class="icon-actions"><button class="icon-button" type="button" title="Editar evento atual" aria-label="Editar evento atual" onclick="editCurrent(${game.id})"><i data-lucide="pencil">✎</i></button><button class="icon-button" type="button" title="Registrar entrada" aria-label="Registrar entrada" onclick="markEntry(${game.id})"><i data-lucide="log-in">→</i></button><button class="icon-button exit-action" type="button" title="Registrar saida" aria-label="Registrar saida" onclick="markExit(${game.id})"><i data-lucide="log-out">←</i></button><button class="icon-button" type="button" title="Ver historico" aria-label="Ver historico" onclick="showHistory(${game.id})"><i data-lucide="history">↺</i></button></div></td>
           </tr>`).join('') + `</tbody></table><div class="pagination"><span>Pagina ${pageInfo.page} de ${pageInfo.pages} - ${pageInfo.total} jogos</span><div class="pagination-actions"><button class="icon-button" title="Pagina anterior" aria-label="Pagina anterior" ${pageInfo.page <= 1 ? 'disabled' : ''} onclick="changePage(-1)"><i data-lucide="chevron-left">‹</i></button><button class="icon-button" title="Proxima pagina" aria-label="Proxima pagina" ${pageInfo.page >= pageInfo.pages ? 'disabled' : ''} onclick="changePage(1)"><i data-lucide="chevron-right">›</i></button></div></div>`;
       if (window.lucide) lucide.createIcons();
     }
