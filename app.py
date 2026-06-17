@@ -554,6 +554,12 @@ def update_event(event_id, payload):
         )
 
 
+def delete_game(game_id):
+    with connect() as conn:
+        execute(conn, "DELETE FROM events WHERE game_id = ?", (game_id,))
+        execute(conn, "DELETE FROM games WHERE id = ?", (game_id,))
+
+
 def history_for_game(game_id):
     with connect() as conn:
         rows = execute(
@@ -664,6 +670,7 @@ INDEX_HTML = r"""<!doctype html>
     textarea { min-height: 74px; resize: vertical; }
     button { background: var(--blue); color: white; border-color: var(--blue); padding: 9px 14px; cursor: pointer; font-weight: 700; }
     button.secondary { background: white; color: var(--blue); border-color: #b8c9f4; }
+    button.danger { background: #b72e56; color: white; border-color: #b72e56; }
     button:disabled { opacity: .6; cursor: wait; }
     .icon-actions { display: flex; gap: 6px; flex-wrap: nowrap; }
     .icon-button { width: 34px; height: 34px; min-height: 34px; padding: 0; display: inline-grid; place-items: center; background: white; color: var(--blue); border-color: #c8d4eb; }
@@ -784,7 +791,7 @@ INDEX_HTML = r"""<!doctype html>
           </div>
           <label for="notes">Notas</label>
           <textarea id="notes" placeholder="Plataformas, fonte ou observacoes"></textarea>
-          <div class="actions"><button id="saveButton" type="submit">Salvar evento</button><button type="button" class="secondary" id="clearForm">Limpar</button></div>
+          <div class="actions"><button id="saveButton" type="submit">Salvar evento</button><button type="button" class="secondary" id="clearForm">Limpar</button><button type="button" class="danger" id="deleteGameButton" hidden>Excluir definitivamente</button></div>
         </form>
       </div>
       <div class="modal-body tab-panel" id="historyTabPanel" hidden><section class="history" id="historyPanel"></section></div>
@@ -816,6 +823,7 @@ INDEX_HTML = r"""<!doctype html>
     let games = [];
     let pageInfo = { page: 1, pages: 1, total: 0 };
     let currentPage = 1;
+    let editingGameId = null;
     const defaultPeriod = new Intl.DateTimeFormat('pt-BR', { month: 'long', year: 'numeric' }).format(new Date()).replace(/^./, c => c.toUpperCase());
     $('period').value = defaultPeriod;
     async function api(path, options = {}) {
@@ -880,18 +888,21 @@ INDEX_HTML = r"""<!doctype html>
     function clearForm() {
       $('eventForm').reset();
       $('eventId').value = '';
+      editingGameId = null;
       $('eventType').value = 'Entrada';
       $('category').disabled = false;
       $('period').value = defaultPeriod;
       $('saveButton').textContent = 'Salvar evento';
       $('eventDialogTitle').textContent = 'Registrar evento';
       $('historyTabButton').hidden = true;
+      $('deleteGameButton').hidden = true;
       $('historyPanel').innerHTML = '';
       activateEventTab('eventTabPanel');
     }
     function fillFromGame(id, eventType) {
       const game = games.find(item => item.id === id);
       if (!game) return;
+      editingGameId = game.id;
       $('title').value = game.title;
       $('coverUrl').value = game.cover_url || '';
       $('eventType').value = eventType;
@@ -902,11 +913,13 @@ INDEX_HTML = r"""<!doctype html>
       $('notes').value = '';
       $('eventDialogTitle').textContent = game.title;
       $('historyTabButton').hidden = false;
+      $('deleteGameButton').hidden = false;
       openEventDialog('eventTabPanel');
     }
     window.editCurrent = function(id) {
       const game = games.find(item => item.id === id);
       if (!game) return;
+      editingGameId = game.id;
       $('eventId').value = game.event_id;
       $('title').value = game.title;
       $('coverUrl').value = game.cover_url || '';
@@ -919,6 +932,7 @@ INDEX_HTML = r"""<!doctype html>
       $('saveButton').textContent = 'Salvar alteracoes';
       $('eventDialogTitle').textContent = game.title;
       $('historyTabButton').hidden = false;
+      $('deleteGameButton').hidden = false;
       openEventDialog('eventTabPanel');
     }
     window.changePage = function(delta) {
@@ -937,9 +951,11 @@ INDEX_HTML = r"""<!doctype html>
     window.markExit = (id) => fillFromGame(id, 'Saida');
     window.showHistory = async function(id) {
       const game = games.find(item => item.id === id);
+      editingGameId = id;
       const items = await api('/api/games/' + id + '/events');
       $('eventDialogTitle').textContent = game ? game.title : 'Historico';
       $('historyTabButton').hidden = false;
+      $('deleteGameButton').hidden = false;
       $('historyPanel').innerHTML = items.length ? items.map((item) => `
         <div class="history-item">
           <strong>${escapeHtml(item.title)}</strong><br>
@@ -957,6 +973,16 @@ INDEX_HTML = r"""<!doctype html>
       await api(eventId ? '/api/events/' + eventId : '/api/events', { method: eventId ? 'PUT' : 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({
         title: $('title').value, cover_url: $('coverUrl').value, event_type: $('eventType').value, category: $('category').value, period: $('period').value, event_date: $('eventDate').value, notes: $('notes').value
       })});
+      clearForm();
+      $('eventDialog').close();
+      await loadGames();
+    });
+    $('deleteGameButton').addEventListener('click', async () => {
+      if (!editingGameId) return;
+      const title = $('title').value || $('eventDialogTitle').textContent || 'este jogo';
+      const confirmed = confirm(`Excluir definitivamente "${title}" e todo o historico dele? Esta acao nao pode ser desfeita.`);
+      if (!confirmed) return;
+      await api('/api/games/' + editingGameId, { method: 'DELETE' });
       clearForm();
       $('eventDialog').close();
       await loadGames();
@@ -1141,6 +1167,13 @@ def api_stats():
 @login_required
 def api_game_events(game_id):
     return jsonify(history_for_game(game_id))
+
+
+@app.route("/api/games/<int:game_id>", methods=["DELETE"])
+@login_required
+def api_delete_game(game_id):
+    delete_game(game_id)
+    return jsonify({"ok": True})
 
 
 @app.route("/api/events", methods=["POST"])
