@@ -616,7 +616,7 @@ def update_event(event_id, payload):
             game_id = consolidate_game_title(conn, title) or game_id
         execute(
             conn,
-            "UPDATE games SET title = ?, cover_url = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+            "UPDATE games SET title = ?, cover_url = COALESCE(NULLIF(?, ''), cover_url), updated_at = CURRENT_TIMESTAMP WHERE id = ?",
             (title, cover_url, game_id),
         )
         execute(
@@ -653,7 +653,17 @@ def history_for_game(game_id):
             FROM events e
             JOIN games g ON g.id = e.game_id
             WHERE UPPER(g.title) = ?
-            ORDER BY e.id DESC
+            ORDER BY
+                e.event_year DESC,
+                e.event_month DESC,
+                CASE
+                    WHEN e.event_type = 'Saida' THEN 4
+                    WHEN e.category = 'Essential' THEN 1
+                    WHEN e.category = 'Extra' THEN 2
+                    WHEN e.category = 'Deluxe' THEN 3
+                    ELSE 5
+                END ASC,
+                e.id DESC
             """,
             (game["title"],),
         ).fetchall()
@@ -809,8 +819,6 @@ INDEX_HTML = r"""<!doctype html>
     .modal-tab { min-height: 40px; padding: 8px 12px; border: 0; border-radius: 0; background: transparent; color: var(--muted); border-bottom: 2px solid transparent; }
     .modal-tab.active { color: var(--blue); border-bottom-color: var(--blue); }
     .tab-panel[hidden] { display: none; }
-    .history-form { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; margin-top: 8px; }
-    .history-form .wide { grid-column: 1 / -1; }
     .history-actions { display: flex; gap: 8px; justify-content: flex-end; margin-top: 8px; }
     #coverDialog { width: min(560px, calc(100% - 24px)); }
     .cover-preview { display: block; width: 100%; max-height: calc(100vh - 150px); object-fit: contain; background: #f8fafc; }
@@ -1058,73 +1066,30 @@ INDEX_HTML = r"""<!doctype html>
           ${item.category ? `<span class="pill ${item.category}">${item.category}</span>` : ''}
           <small>${escapeHtml(item.period)} ${item.event_date ? '- ' + escapeHtml(item.event_date) : ''}</small>
           ${item.notes ? `<br><small>${escapeHtml(item.notes)}</small>` : ''}
-          <div class="history-form">
-            <div>
-              <label>Evento</label>
-              <select data-history-field="event_type" onchange="toggleHistoryCategory(${item.id})">
-                <option ${item.event_type === 'Entrada' ? 'selected' : ''}>Entrada</option>
-                <option ${item.event_type === 'Saida' ? 'selected' : ''}>Saida</option>
-              </select>
-            </div>
-            <div>
-              <label>Categoria</label>
-              <select data-history-field="category" ${item.event_type === 'Saida' ? 'disabled' : ''}>
-                <option ${item.category === 'Essential' ? 'selected' : ''}>Essential</option>
-                <option ${item.category === 'Extra' ? 'selected' : ''}>Extra</option>
-                <option ${item.category === 'Deluxe' ? 'selected' : ''}>Deluxe</option>
-              </select>
-            </div>
-            <div>
-              <label>Mes/Ano</label>
-              <input data-history-field="period" value="${escapeHtml(item.period || '')}">
-            </div>
-            <div>
-              <label>Data exata</label>
-              <input data-history-field="event_date" type="date" value="${escapeHtml(item.event_date || '')}">
-            </div>
-            <div class="wide">
-              <label>Notas</label>
-              <textarea data-history-field="notes">${escapeHtml(item.notes || '')}</textarea>
-            </div>
-          </div>
           <div class="history-actions">
-            <button type="button" class="secondary" onclick="saveHistoryEvent(${item.id})">Salvar historico</button>
-            <button type="button" class="danger" onclick="deleteHistoryEvent(${item.id})">Excluir historico</button>
+            <button type="button" class="icon-button" title="Editar este historico" aria-label="Editar este historico" onclick="editHistoryEvent(${item.id})"><i data-lucide="pencil">✎</i></button>
+            <button type="button" class="icon-button danger" title="Excluir este historico" aria-label="Excluir este historico" onclick="deleteHistoryEvent(${item.id})"><i data-lucide="trash-2">×</i></button>
           </div>
         </div>`).join('') : '<div class="empty">Nenhum evento no historico.</div>';
+      if (window.lucide) lucide.createIcons();
     }
-    function historyElement(eventId) {
-      return document.querySelector(`[data-history-event="${eventId}"]`);
-    }
-    window.toggleHistoryCategory = function(eventId) {
-      const root = historyElement(eventId);
-      if (!root) return;
-      const type = root.querySelector('[data-history-field="event_type"]').value;
-      root.querySelector('[data-history-field="category"]').disabled = type === 'Saida';
-    }
-    window.saveHistoryEvent = async function(eventId) {
-      const root = historyElement(eventId);
-      if (!root) return;
-      const field = (name) => root.querySelector(`[data-history-field="${name}"]`);
-      try {
-        await api('/api/events/' + eventId, {
-          method: 'PUT',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            title: $('title').value || $('eventDialogTitle').textContent,
-            cover_url: $('coverUrl').value,
-            event_type: field('event_type').value,
-            category: field('category').value,
-            period: field('period').value,
-            event_date: field('event_date').value,
-            notes: field('notes').value,
-          }),
-        });
-        await loadHistory(editingGameId);
-        await loadGames();
-      } catch (error) {
-        alert(error.message);
-      }
+    window.editHistoryEvent = async function(eventId) {
+      const items = await api('/api/games/' + editingGameId + '/events');
+      const item = items.find((event) => event.id === eventId);
+      if (!item) return;
+      $('eventId').value = item.id;
+      $('title').value = item.title;
+      const game = games.find((entry) => entry.id === editingGameId);
+      $('coverUrl').value = game ? (game.cover_url || '') : '';
+      $('eventType').value = item.event_type;
+      $('category').value = item.category || 'Extra';
+      $('category').disabled = item.event_type === 'Saida';
+      $('period').value = item.period || defaultPeriod;
+      $('eventDate').value = item.event_date || '';
+      $('notes').value = item.notes || '';
+      $('eventMessage').textContent = '';
+      $('saveButton').textContent = 'Salvar alteracoes';
+      await activateEventTab('eventTabPanel');
     }
     window.deleteHistoryEvent = async function(eventId) {
       if (!confirm('Excluir este evento do historico? Esta acao nao pode ser desfeita.')) return;
