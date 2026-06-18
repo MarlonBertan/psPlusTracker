@@ -982,6 +982,7 @@ INDEX_HTML = r"""<!doctype html>
       const game = games.find(item => item.id === id);
       if (!game) return;
       editingGameId = game.id;
+      $('eventId').value = '';
       $('title').value = game.title;
       $('coverUrl').value = game.cover_url || '';
       $('eventType').value = eventType;
@@ -990,6 +991,8 @@ INDEX_HTML = r"""<!doctype html>
       $('period').value = defaultPeriod;
       $('eventDate').value = '';
       $('notes').value = '';
+      $('eventMessage').textContent = '';
+      $('saveButton').textContent = 'Salvar evento';
       $('eventDialogTitle').textContent = game.title;
       $('historyTabButton').hidden = false;
       $('deleteGameButton').hidden = false;
@@ -1051,7 +1054,7 @@ INDEX_HTML = r"""<!doctype html>
       const eventId = $('eventId').value;
       $('eventMessage').textContent = '';
       try {
-        if (!eventId) {
+        if (!eventId && !editingGameId) {
           const check = await api('/api/games/check-title?title=' + encodeURIComponent($('title').value));
           if (check.matches.length) {
             const names = check.matches.map((item) => item.title).join(', ');
