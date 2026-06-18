@@ -1068,7 +1068,7 @@ INDEX_HTML = r"""<!doctype html>
           ${item.notes ? `<br><small>${escapeHtml(item.notes)}</small>` : ''}
           <div class="history-actions">
             <button type="button" class="icon-button" title="Editar este historico" aria-label="Editar este historico" onclick="editHistoryEvent(${item.id})"><i data-lucide="pencil">✎</i></button>
-            <button type="button" class="icon-button danger" title="Excluir este historico" aria-label="Excluir este historico" onclick="deleteHistoryEvent(${item.id})"><i data-lucide="trash-2">×</i></button>
+            <button type="button" class="icon-button" title="Excluir este historico" aria-label="Excluir este historico" onclick="deleteHistoryEvent(${item.id})"><i data-lucide="eraser">⌫</i></button>
           </div>
         </div>`).join('') : '<div class="empty">Nenhum evento no historico.</div>';
       if (window.lucide) lucide.createIcons();
