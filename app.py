@@ -950,13 +950,16 @@ INDEX_HTML = r"""<!doctype html>
           </tr>`).join('') + `</tbody></table><div class="pagination"><span>Pagina ${pageInfo.page} de ${pageInfo.pages} - ${pageInfo.total} jogos</span><div class="pagination-actions"><button class="icon-button" title="Pagina anterior" aria-label="Pagina anterior" ${pageInfo.page <= 1 ? 'disabled' : ''} onclick="changePage(-1)"><i data-lucide="chevron-left">‹</i></button><button class="icon-button" title="Proxima pagina" aria-label="Proxima pagina" ${pageInfo.page >= pageInfo.pages ? 'disabled' : ''} onclick="changePage(1)"><i data-lucide="chevron-right">›</i></button></div></div>`;
       if (window.lucide) lucide.createIcons();
     }
-    function activateEventTab(panelId) {
+    async function activateEventTab(panelId) {
       ['eventTabPanel', 'historyTabPanel'].forEach((id) => {
         $(id).hidden = id !== panelId;
       });
       document.querySelectorAll('.modal-tab').forEach((button) => {
         button.classList.toggle('active', button.dataset.tab === panelId);
       });
+      if (panelId === 'historyTabPanel' && editingGameId) {
+        await loadHistory(editingGameId);
+      }
     }
     function openEventDialog(panelId = 'eventTabPanel') {
       activateEventTab(panelId);
@@ -992,6 +995,7 @@ INDEX_HTML = r"""<!doctype html>
       $('eventDate').value = '';
       $('notes').value = '';
       $('eventMessage').textContent = '';
+      $('historyPanel').innerHTML = '';
       $('saveButton').textContent = 'Salvar evento';
       $('eventDialogTitle').textContent = game.title;
       $('historyTabButton').hidden = false;
@@ -1015,6 +1019,7 @@ INDEX_HTML = r"""<!doctype html>
       $('eventDialogTitle').textContent = game.title;
       $('historyTabButton').hidden = false;
       $('deleteGameButton').hidden = false;
+      $('historyPanel').innerHTML = '';
       openEventDialog('eventTabPanel');
     }
     window.changePage = function(delta) {
@@ -1031,13 +1036,10 @@ INDEX_HTML = r"""<!doctype html>
     }
     window.markEntry = (id) => fillFromGame(id, 'Entrada');
     window.markExit = (id) => fillFromGame(id, 'Saida');
-    window.showHistory = async function(id) {
+    async function loadHistory(id) {
       const game = games.find(item => item.id === id);
-      editingGameId = id;
       const items = await api('/api/games/' + id + '/events');
       $('eventDialogTitle').textContent = game ? game.title : 'Historico';
-      $('historyTabButton').hidden = false;
-      $('deleteGameButton').hidden = false;
       $('historyPanel').innerHTML = items.length ? items.map((item) => `
         <div class="history-item">
           <strong>${escapeHtml(item.title)}</strong><br>
@@ -1046,6 +1048,12 @@ INDEX_HTML = r"""<!doctype html>
           <small>${escapeHtml(item.period)} ${item.event_date ? '- ' + escapeHtml(item.event_date) : ''}</small>
           ${item.notes ? `<br><small>${escapeHtml(item.notes)}</small>` : ''}
         </div>`).join('') : '<div class="empty">Nenhum evento no historico.</div>';
+    }
+    window.showHistory = async function(id) {
+      editingGameId = id;
+      $('historyTabButton').hidden = false;
+      $('deleteGameButton').hidden = false;
+      await loadHistory(id);
       openEventDialog('historyTabPanel');
     }
     $('eventType').addEventListener('change', () => { $('category').disabled = $('eventType').value === 'Saida'; });
