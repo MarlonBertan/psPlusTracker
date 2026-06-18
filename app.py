@@ -888,7 +888,7 @@ INDEX_HTML = r"""<!doctype html>
           <label for="notes">Notas</label>
           <textarea id="notes" placeholder="Plataformas, fonte ou observacoes"></textarea>
           <div class="toast" id="eventMessage"></div>
-          <div class="actions"><button id="saveButton" type="submit">Salvar evento</button><button type="button" class="secondary" id="clearForm">Limpar</button><button type="button" class="danger" id="deleteGameButton" hidden>Excluir definitivamente</button></div>
+          <div class="actions"><button id="saveButton" type="submit">Salvar evento</button><button type="button" class="secondary" id="saveAsNewButton" hidden>Salvar como novo evento</button><button type="button" class="secondary" id="clearForm">Limpar</button><button type="button" class="danger" id="deleteGameButton" hidden>Excluir definitivamente</button></div>
         </form>
       </div>
       <div class="modal-body tab-panel" id="historyTabPanel" hidden><section class="history" id="historyPanel"></section></div>
@@ -993,6 +993,7 @@ INDEX_HTML = r"""<!doctype html>
       $('category').disabled = false;
       $('period').value = defaultPeriod;
       $('saveButton').textContent = 'Salvar evento';
+      $('saveAsNewButton').hidden = true;
       $('eventMessage').textContent = '';
       $('eventDialogTitle').textContent = 'Registrar evento';
       $('historyTabButton').hidden = true;
@@ -1016,6 +1017,7 @@ INDEX_HTML = r"""<!doctype html>
       $('eventMessage').textContent = '';
       $('historyPanel').innerHTML = '';
       $('saveButton').textContent = 'Salvar evento';
+      $('saveAsNewButton').hidden = true;
       $('eventDialogTitle').textContent = game.title;
       $('historyTabButton').hidden = false;
       $('deleteGameButton').hidden = false;
@@ -1035,6 +1037,7 @@ INDEX_HTML = r"""<!doctype html>
       $('eventDate').value = game.event_date || '';
       $('notes').value = game.notes || '';
       $('saveButton').textContent = 'Salvar alteracoes';
+      $('saveAsNewButton').hidden = false;
       $('eventDialogTitle').textContent = game.title;
       $('historyTabButton').hidden = false;
       $('deleteGameButton').hidden = false;
@@ -1089,6 +1092,7 @@ INDEX_HTML = r"""<!doctype html>
       $('notes').value = item.notes || '';
       $('eventMessage').textContent = '';
       $('saveButton').textContent = 'Salvar alteracoes';
+      $('saveAsNewButton').hidden = false;
       await activateEventTab('eventTabPanel');
     }
     window.deleteHistoryEvent = async function(eventId) {
@@ -1131,6 +1135,12 @@ INDEX_HTML = r"""<!doctype html>
       } catch (error) {
         $('eventMessage').textContent = error.message;
       }
+    });
+    $('saveAsNewButton').addEventListener('click', () => {
+      $('eventId').value = '';
+      $('saveButton').textContent = 'Salvar evento';
+      $('saveAsNewButton').hidden = true;
+      $('eventMessage').textContent = 'Modo novo evento: ao salvar, sera criado um novo historico.';
     });
     $('deleteGameButton').addEventListener('click', async () => {
       if (!editingGameId) return;
