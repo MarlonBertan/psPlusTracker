@@ -4,6 +4,7 @@ import re
 import sqlite3
 import sys
 from datetime import date, datetime
+from difflib import SequenceMatcher
 from functools import wraps
 
 from flask import Flask, jsonify, redirect, render_template_string, request, session, url_for
@@ -58,6 +59,10 @@ def row_to_dict(row):
 
 def execute(conn, query, params=()):
     return conn.execute(sql(query), params)
+
+
+def row_id(row):
+    return row["id"]
 
 
 def init_db():
@@ -234,6 +239,71 @@ def period_parts(period):
     return int(match.group(2)), MONTH_NUMBERS.get(match.group(1).lower(), 0)
 
 
+def title_similarity(left, right):
+    left = clean_title(left)
+    right = clean_title(right)
+    if not left or not right:
+        return 0
+    if left == right:
+        return 1
+    if left in right or right in left:
+        return 0.92
+    return SequenceMatcher(None, left, right).ratio()
+
+
+def find_similar_games(title, limit=5):
+    title = clean_title(title)
+    if not title:
+        return []
+    with connect() as conn:
+        rows = execute(conn, "SELECT id, UPPER(title) AS title FROM games ORDER BY title").fetchall()
+    matches = []
+    for row in rows:
+        score = title_similarity(title, row["title"])
+        if score >= 0.82:
+            matches.append({"id": row["id"], "title": row["title"], "score": round(score, 3)})
+    matches.sort(key=lambda item: (-item["score"], item["title"]))
+    return matches[:limit]
+
+
+def consolidate_game_title(conn, title):
+    title = clean_title(title)
+    rows = execute(conn, "SELECT id, title, cover_url FROM games WHERE UPPER(title) = ? ORDER BY id", (title,)).fetchall()
+    if not rows:
+        return None
+    keeper = rows[0]
+    keeper_id = keeper["id"]
+    keeper_cover = keeper["cover_url"] or ""
+    for duplicate in rows[1:]:
+        events = execute(
+            conn,
+            "SELECT id, event_type, category, period FROM events WHERE game_id = ?",
+            (duplicate["id"],),
+        ).fetchall()
+        for event in events:
+            existing = execute(
+                conn,
+                """
+                SELECT id FROM events
+                WHERE game_id = ? AND event_type = ? AND category = ? AND period = ?
+                """,
+                (keeper_id, event["event_type"], event["category"], event["period"]),
+            ).fetchone()
+            if existing:
+                execute(conn, "DELETE FROM events WHERE id = ?", (event["id"],))
+            else:
+                execute(conn, "UPDATE events SET game_id = ? WHERE id = ?", (keeper_id, event["id"]))
+        if not keeper_cover and duplicate["cover_url"]:
+            keeper_cover = duplicate["cover_url"]
+        execute(conn, "DELETE FROM games WHERE id = ?", (duplicate["id"],))
+    execute(
+        conn,
+        "UPDATE games SET title = ?, cover_url = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+        (title, keeper_cover, keeper_id),
+    )
+    return keeper_id
+
+
 def split_title_and_notes(line):
     notes = []
     title = line.strip()
@@ -335,6 +405,7 @@ def prepare_event(payload):
 
 def upsert_event_with_connection(conn, payload):
     title, event_type, category, period, event_date, notes, cover_url, event_year, event_month = prepare_event(payload)
+    consolidate_game_title(conn, title)
 
     row = execute(conn, "SELECT id FROM games WHERE UPPER(title) = ? ORDER BY id LIMIT 1", (title,)).fetchone()
     if row:
@@ -535,13 +606,14 @@ def latest_games(filters):
 def update_event(event_id, payload):
     title, event_type, category, period, event_date, notes, cover_url, event_year, event_month = prepare_event(payload)
     with connect() as conn:
+        consolidate_game_title(conn, title)
         event = execute(conn, "SELECT game_id FROM events WHERE id = ?", (event_id,)).fetchone()
         if not event:
             raise ValueError("Evento nao encontrado.")
         game_id = event["game_id"]
         duplicate = execute(conn, "SELECT id FROM games WHERE UPPER(title) = ? AND id <> ?", (title, game_id)).fetchone()
         if duplicate:
-            raise ValueError("Ja existe outro jogo com esse nome.")
+            game_id = consolidate_game_title(conn, title) or game_id
         execute(
             conn,
             "UPDATE games SET title = ?, cover_url = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
@@ -562,16 +634,20 @@ def delete_game(game_id):
 
 def history_for_game(game_id):
     with connect() as conn:
+        game = execute(conn, "SELECT UPPER(title) AS title FROM games WHERE id = ?", (game_id,)).fetchone()
+        if not game:
+            return []
+        consolidate_game_title(conn, game["title"])
         rows = execute(
             conn,
             """
             SELECT e.*, UPPER(g.title) AS title
             FROM events e
             JOIN games g ON g.id = e.game_id
-            WHERE e.game_id = ?
+            WHERE UPPER(g.title) = ?
             ORDER BY e.id DESC
             """,
-            (game_id,),
+            (game["title"],),
         ).fetchall()
     return [row_to_dict(row) for row in rows]
 
@@ -792,6 +868,7 @@ INDEX_HTML = r"""<!doctype html>
           </div>
           <label for="notes">Notas</label>
           <textarea id="notes" placeholder="Plataformas, fonte ou observacoes"></textarea>
+          <div class="toast" id="eventMessage"></div>
           <div class="actions"><button id="saveButton" type="submit">Salvar evento</button><button type="button" class="secondary" id="clearForm">Limpar</button><button type="button" class="danger" id="deleteGameButton" hidden>Excluir definitivamente</button></div>
         </form>
       </div>
@@ -894,6 +971,7 @@ INDEX_HTML = r"""<!doctype html>
       $('category').disabled = false;
       $('period').value = defaultPeriod;
       $('saveButton').textContent = 'Salvar evento';
+      $('eventMessage').textContent = '';
       $('eventDialogTitle').textContent = 'Registrar evento';
       $('historyTabButton').hidden = true;
       $('deleteGameButton').hidden = true;
@@ -971,12 +1049,25 @@ INDEX_HTML = r"""<!doctype html>
     $('eventForm').addEventListener('submit', async (event) => {
       event.preventDefault();
       const eventId = $('eventId').value;
-      await api(eventId ? '/api/events/' + eventId : '/api/events', { method: eventId ? 'PUT' : 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({
-        title: $('title').value, cover_url: $('coverUrl').value, event_type: $('eventType').value, category: $('category').value, period: $('period').value, event_date: $('eventDate').value, notes: $('notes').value
-      })});
-      clearForm();
-      $('eventDialog').close();
-      await loadGames();
+      $('eventMessage').textContent = '';
+      try {
+        if (!eventId) {
+          const check = await api('/api/games/check-title?title=' + encodeURIComponent($('title').value));
+          if (check.matches.length) {
+            const names = check.matches.map((item) => item.title).join(', ');
+            const confirmed = confirm(`Ja existe jogo com nome igual ou semelhante: ${names}. Deseja cadastrar este evento mesmo assim?`);
+            if (!confirmed) return;
+          }
+        }
+        await api(eventId ? '/api/events/' + eventId : '/api/events', { method: eventId ? 'PUT' : 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({
+          title: $('title').value, cover_url: $('coverUrl').value, event_type: $('eventType').value, category: $('category').value, period: $('period').value, event_date: $('eventDate').value, notes: $('notes').value
+        })});
+        clearForm();
+        $('eventDialog').close();
+        await loadGames();
+      } catch (error) {
+        $('eventMessage').textContent = error.message;
+      }
     });
     $('deleteGameButton').addEventListener('click', async () => {
       if (!editingGameId) return;
@@ -1156,6 +1247,12 @@ def api_games():
         "per_page": request.args.get("per_page", "25"),
     }
     return jsonify(latest_games(filters))
+
+
+@app.route("/api/games/check-title")
+@login_required
+def api_check_title():
+    return jsonify({"matches": find_similar_games(request.args.get("title", ""))})
 
 
 @app.route("/api/stats")
