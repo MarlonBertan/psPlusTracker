@@ -632,6 +632,14 @@ def delete_game(game_id):
         execute(conn, "DELETE FROM games WHERE id = ?", (game_id,))
 
 
+def delete_event(event_id):
+    with connect() as conn:
+        event = execute(conn, "SELECT game_id FROM events WHERE id = ?", (event_id,)).fetchone()
+        if not event:
+            raise ValueError("Evento nao encontrado.")
+        execute(conn, "DELETE FROM events WHERE id = ?", (event_id,))
+
+
 def history_for_game(game_id):
     with connect() as conn:
         game = execute(conn, "SELECT UPPER(title) AS title FROM games WHERE id = ?", (game_id,)).fetchone()
@@ -801,6 +809,9 @@ INDEX_HTML = r"""<!doctype html>
     .modal-tab { min-height: 40px; padding: 8px 12px; border: 0; border-radius: 0; background: transparent; color: var(--muted); border-bottom: 2px solid transparent; }
     .modal-tab.active { color: var(--blue); border-bottom-color: var(--blue); }
     .tab-panel[hidden] { display: none; }
+    .history-form { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; margin-top: 8px; }
+    .history-form .wide { grid-column: 1 / -1; }
+    .history-actions { display: flex; gap: 8px; justify-content: flex-end; margin-top: 8px; }
     #coverDialog { width: min(560px, calc(100% - 24px)); }
     .cover-preview { display: block; width: 100%; max-height: calc(100vh - 150px); object-fit: contain; background: #f8fafc; }
     @media (max-width: 900px) {
@@ -1041,13 +1052,89 @@ INDEX_HTML = r"""<!doctype html>
       const items = await api('/api/games/' + id + '/events');
       $('eventDialogTitle').textContent = game ? game.title : 'Historico';
       $('historyPanel').innerHTML = items.length ? items.map((item) => `
-        <div class="history-item">
+        <div class="history-item" data-history-event="${item.id}">
           <strong>${escapeHtml(item.title)}</strong><br>
           <span class="pill ${item.event_type}">${item.event_type}</span>
           ${item.category ? `<span class="pill ${item.category}">${item.category}</span>` : ''}
           <small>${escapeHtml(item.period)} ${item.event_date ? '- ' + escapeHtml(item.event_date) : ''}</small>
           ${item.notes ? `<br><small>${escapeHtml(item.notes)}</small>` : ''}
+          <div class="history-form">
+            <div>
+              <label>Evento</label>
+              <select data-history-field="event_type" onchange="toggleHistoryCategory(${item.id})">
+                <option ${item.event_type === 'Entrada' ? 'selected' : ''}>Entrada</option>
+                <option ${item.event_type === 'Saida' ? 'selected' : ''}>Saida</option>
+              </select>
+            </div>
+            <div>
+              <label>Categoria</label>
+              <select data-history-field="category" ${item.event_type === 'Saida' ? 'disabled' : ''}>
+                <option ${item.category === 'Essential' ? 'selected' : ''}>Essential</option>
+                <option ${item.category === 'Extra' ? 'selected' : ''}>Extra</option>
+                <option ${item.category === 'Deluxe' ? 'selected' : ''}>Deluxe</option>
+              </select>
+            </div>
+            <div>
+              <label>Mes/Ano</label>
+              <input data-history-field="period" value="${escapeHtml(item.period || '')}">
+            </div>
+            <div>
+              <label>Data exata</label>
+              <input data-history-field="event_date" type="date" value="${escapeHtml(item.event_date || '')}">
+            </div>
+            <div class="wide">
+              <label>Notas</label>
+              <textarea data-history-field="notes">${escapeHtml(item.notes || '')}</textarea>
+            </div>
+          </div>
+          <div class="history-actions">
+            <button type="button" class="secondary" onclick="saveHistoryEvent(${item.id})">Salvar historico</button>
+            <button type="button" class="danger" onclick="deleteHistoryEvent(${item.id})">Excluir historico</button>
+          </div>
         </div>`).join('') : '<div class="empty">Nenhum evento no historico.</div>';
+    }
+    function historyElement(eventId) {
+      return document.querySelector(`[data-history-event="${eventId}"]`);
+    }
+    window.toggleHistoryCategory = function(eventId) {
+      const root = historyElement(eventId);
+      if (!root) return;
+      const type = root.querySelector('[data-history-field="event_type"]').value;
+      root.querySelector('[data-history-field="category"]').disabled = type === 'Saida';
+    }
+    window.saveHistoryEvent = async function(eventId) {
+      const root = historyElement(eventId);
+      if (!root) return;
+      const field = (name) => root.querySelector(`[data-history-field="${name}"]`);
+      try {
+        await api('/api/events/' + eventId, {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            title: $('title').value || $('eventDialogTitle').textContent,
+            cover_url: $('coverUrl').value,
+            event_type: field('event_type').value,
+            category: field('category').value,
+            period: field('period').value,
+            event_date: field('event_date').value,
+            notes: field('notes').value,
+          }),
+        });
+        await loadHistory(editingGameId);
+        await loadGames();
+      } catch (error) {
+        alert(error.message);
+      }
+    }
+    window.deleteHistoryEvent = async function(eventId) {
+      if (!confirm('Excluir este evento do historico? Esta acao nao pode ser desfeita.')) return;
+      try {
+        await api('/api/events/' + eventId, { method: 'DELETE' });
+        await loadHistory(editingGameId);
+        await loadGames();
+      } catch (error) {
+        alert(error.message);
+      }
     }
     window.showHistory = async function(id) {
       editingGameId = id;
@@ -1300,6 +1387,16 @@ def api_events():
 def api_update_event(event_id):
     try:
         update_event(event_id, request.get_json(force=True))
+        return jsonify({"ok": True})
+    except Exception as exc:
+        return jsonify({"error": str(exc)}), 400
+
+
+@app.route("/api/events/<int:event_id>", methods=["DELETE"])
+@login_required
+def api_delete_event(event_id):
+    try:
+        delete_event(event_id)
         return jsonify({"ok": True})
     except Exception as exc:
         return jsonify({"error": str(exc)}), 400
