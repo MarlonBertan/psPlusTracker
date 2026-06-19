@@ -543,15 +543,36 @@ def latest_games(filters):
     page = max(int(filters.get("page") or 1), 1)
     per_page = min(max(int(filters.get("per_page") or 25), 5), 100)
     offset = (page - 1) * per_page
+    latest_cte = """
+            WITH ranked_events AS (
+                SELECT
+                    e.*,
+                    ROW_NUMBER() OVER (
+                        PARTITION BY e.game_id
+                        ORDER BY
+                            e.event_year DESC,
+                            e.event_month DESC,
+                            CASE
+                                WHEN e.event_type = 'Saida' THEN 4
+                                WHEN e.category = 'Essential' THEN 1
+                                WHEN e.category = 'Extra' THEN 2
+                                WHEN e.category = 'Deluxe' THEN 3
+                                ELSE 5
+                            END DESC,
+                            e.id DESC
+                    ) AS rn
+                FROM events e
+            ),
+            latest AS (
+                SELECT * FROM ranked_events WHERE rn = 1
+            )
+    """
 
     with connect() as conn:
         total = execute(
             conn,
             f"""
-            WITH latest AS (
-                SELECT e.* FROM events e
-                JOIN (SELECT game_id, MAX(id) AS id FROM events GROUP BY game_id) x ON x.id = e.id
-            )
+            {latest_cte}
             SELECT COUNT(*) AS total FROM games g JOIN latest ON latest.game_id = g.id {where}
             """,
             params,
@@ -559,11 +580,7 @@ def latest_games(filters):
         rows = execute(
             conn,
             f"""
-            WITH latest AS (
-                SELECT e.*
-                FROM events e
-                JOIN (SELECT game_id, MAX(id) AS id FROM events GROUP BY game_id) x ON x.id = e.id
-            )
+            {latest_cte}
             SELECT
                 g.id,
                 UPPER(g.title) AS title,
@@ -675,10 +692,27 @@ def counts():
         row = execute(
             conn,
             """
-            WITH latest AS (
-                SELECT e.*
+            WITH ranked_events AS (
+                SELECT
+                    e.*,
+                    ROW_NUMBER() OVER (
+                        PARTITION BY e.game_id
+                        ORDER BY
+                            e.event_year DESC,
+                            e.event_month DESC,
+                            CASE
+                                WHEN e.event_type = 'Saida' THEN 4
+                                WHEN e.category = 'Essential' THEN 1
+                                WHEN e.category = 'Extra' THEN 2
+                                WHEN e.category = 'Deluxe' THEN 3
+                                ELSE 5
+                            END DESC,
+                            e.id DESC
+                    ) AS rn
                 FROM events e
-                JOIN (SELECT game_id, MAX(id) AS id FROM events GROUP BY game_id) x ON x.id = e.id
+            ),
+            latest AS (
+                SELECT * FROM ranked_events WHERE rn = 1
             )
             SELECT
                 COUNT(*) AS total,
@@ -888,7 +922,7 @@ INDEX_HTML = r"""<!doctype html>
           <label for="notes">Notas</label>
           <textarea id="notes" placeholder="Plataformas, fonte ou observacoes"></textarea>
           <div class="toast" id="eventMessage"></div>
-          <div class="actions"><button id="saveButton" type="submit">Salvar evento</button><button type="button" class="secondary" id="saveAsNewButton" hidden>Salvar como novo evento</button><button type="button" class="secondary" id="clearForm">Limpar</button><button type="button" class="danger" id="deleteGameButton" hidden>Excluir definitivamente</button></div>
+          <div class="actions"><button id="saveButton" type="submit">Salvar evento</button><button type="button" class="secondary" id="clearForm">Limpar</button><button type="button" class="danger" id="deleteGameButton" hidden>Excluir definitivamente</button></div>
         </form>
       </div>
       <div class="modal-body tab-panel" id="historyTabPanel" hidden><section class="history" id="historyPanel"></section></div>
@@ -993,7 +1027,6 @@ INDEX_HTML = r"""<!doctype html>
       $('category').disabled = false;
       $('period').value = defaultPeriod;
       $('saveButton').textContent = 'Salvar evento';
-      $('saveAsNewButton').hidden = true;
       $('eventMessage').textContent = '';
       $('eventDialogTitle').textContent = 'Registrar evento';
       $('historyTabButton').hidden = true;
@@ -1017,7 +1050,6 @@ INDEX_HTML = r"""<!doctype html>
       $('eventMessage').textContent = '';
       $('historyPanel').innerHTML = '';
       $('saveButton').textContent = 'Salvar evento';
-      $('saveAsNewButton').hidden = true;
       $('eventDialogTitle').textContent = game.title;
       $('historyTabButton').hidden = false;
       $('deleteGameButton').hidden = false;
@@ -1037,7 +1069,6 @@ INDEX_HTML = r"""<!doctype html>
       $('eventDate').value = game.event_date || '';
       $('notes').value = game.notes || '';
       $('saveButton').textContent = 'Salvar alteracoes';
-      $('saveAsNewButton').hidden = false;
       $('eventDialogTitle').textContent = game.title;
       $('historyTabButton').hidden = false;
       $('deleteGameButton').hidden = false;
@@ -1092,7 +1123,6 @@ INDEX_HTML = r"""<!doctype html>
       $('notes').value = item.notes || '';
       $('eventMessage').textContent = '';
       $('saveButton').textContent = 'Salvar alteracoes';
-      $('saveAsNewButton').hidden = false;
       await activateEventTab('eventTabPanel');
     }
     window.deleteHistoryEvent = async function(eventId) {
@@ -1135,12 +1165,6 @@ INDEX_HTML = r"""<!doctype html>
       } catch (error) {
         $('eventMessage').textContent = error.message;
       }
-    });
-    $('saveAsNewButton').addEventListener('click', () => {
-      $('eventId').value = '';
-      $('saveButton').textContent = 'Salvar evento';
-      $('saveAsNewButton').hidden = true;
-      $('eventMessage').textContent = 'Modo novo evento: ao salvar, sera criado um novo historico.';
     });
     $('deleteGameButton').addEventListener('click', async () => {
       if (!editingGameId) return;
