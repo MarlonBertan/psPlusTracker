@@ -220,7 +220,8 @@ def parse_date(value):
 
 def clean_title(title):
     title = re.sub(r"[\x00-\x1f]", "", title or "")
-    title = re.sub(r"^[\-*•\d\.\)\s]+", "", title).strip()
+    title = re.sub(r"^[\-*•\s]+", "", title).strip()
+    title = re.sub(r"^\d+[\.)]\s*", "", title).strip()
     title = re.sub(r"\s*\[[^\]]+\]\s*$", "", title)
     title = re.sub(
         r"\s*\((?:PS4|PS5|PS1|PS2|PS3|PSP|PS VR2?|PSVR2?|PS4/PS5|PS5/PS4|PS4, PS5|PS5, PS4|PS4 e PS5|PS5 e PS4|Apenas no plano Deluxe)\)\s*$",
