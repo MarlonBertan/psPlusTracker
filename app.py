@@ -234,7 +234,7 @@ def clean_title(title):
 
 
 def period_parts(period):
-    match = re.search(r"([A-Za-zÀ-ÿ]+)\s+(\d{4})", period or "", flags=re.I)
+    match = re.search(r"([A-Za-zÀ-ÿ]+)(?:\s+de)?\s+(\d{4})", period or "", flags=re.I)
     if not match:
         return 0, 0
     return int(match.group(2)), MONTH_NUMBERS.get(match.group(1).lower(), 0)
